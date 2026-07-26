@@ -1,0 +1,33 @@
+name: Rust CI
+
+on: [push, pull_request]
+
+jobs:
+  build_and_test:
+    name: Rust Cargo CI on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      matrix:
+        os: [ubuntu-latest]
+
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Cargo format
+        run: cargo fmt --check
+
+      - name: Cargo test
+        run: cargo test --all-features
+
+      - name: Cargo release build
+        run: cargo build --release --all-features
+
+      - name: Show development + release build sizes
+        run: |
+          ls -lh target/debug/ || true
+          ls -lh target/release/

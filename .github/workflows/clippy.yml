@@ -1,0 +1,22 @@
+name: RustClippy CI
+
+on: [push, pull_request]
+
+jobs:
+  clippy:
+    name: Rust Clippy CI on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      matrix:
+        os: [ubuntu-latest]
+
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Cargo clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
