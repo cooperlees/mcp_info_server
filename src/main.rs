@@ -79,6 +79,7 @@ async fn main() -> Result<(), AppError> {
 
     let app = Router::new()
         .nest_service("/mcp", mcp_service)
+        .route("/", get(root))
         .route("/coopers-resume", get(resume_route::coopers_resume))
         .route("/healthz", get(healthz))
         .with_state(state);
@@ -98,8 +99,41 @@ async fn main() -> Result<(), AppError> {
     Ok(())
 }
 
-async fn healthz() -> StatusCode {
-    StatusCode::OK
+const BANNER: &str = r#"
+ __  __  ____ ____
+|  \/  |/ ___|  _ \
+| |\/| | |   | |_) |
+| |  | | |___|  __/
+|_|  |_|\____|_|
+
+  mcp_info_server -- Cooper Lees' public MCP endpoint  ::  cooperlees.com
+
+  Production Engineer (SRE) turned MCP author. Written in Rust, deployed
+  over IPv6 wherever possible, no auth required -- the content was
+  already public. G'day from 🇦🇺.
+
+  Routes:
+    POST /mcp             MCP tools: list_posts, get_post, list_pages,
+                           get_page, get_resume
+    GET  /coopers-resume   Cooper's resume, rendered as Markdown
+    GET  /healthz          Liveness check
+
+  https://github.com/cooperlees/mcp_info_server
+"#;
+
+async fn root() -> (axum::http::HeaderMap, &'static str) {
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        "text/plain; charset=utf-8"
+            .parse()
+            .expect("valid header value"),
+    );
+    (headers, BANNER)
+}
+
+async fn healthz() -> (StatusCode, &'static str) {
+    (StatusCode::OK, "Ok")
 }
 
 async fn shutdown_signal() {

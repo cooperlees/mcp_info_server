@@ -34,8 +34,9 @@ per client).
 
 | Route | Description |
 |---|---|
+| `GET /` | ASCII-art landing page listing available routes/tools |
 | `GET /coopers-resume` | The same rendered resume `get_resume` returns, as `text/markdown` — no MCP client needed |
-| `GET /healthz` | Liveness check, always `200` |
+| `GET /healthz` | Liveness check, always `200`, body `Ok` |
 
 ## Connecting an LLM TUI
 
