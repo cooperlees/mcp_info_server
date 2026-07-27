@@ -1,0 +1,172 @@
+# mcp_info_server
+
+[![Rust CI](https://github.com/cooperlees/mcp_info_server/actions/workflows/ci.yml/badge.svg)](https://github.com/cooperlees/mcp_info_server/actions/workflows/ci.yml)
+[![Rust Clippy CI](https://github.com/cooperlees/mcp_info_server/actions/workflows/clippy.yml/badge.svg)](https://github.com/cooperlees/mcp_info_server/actions/workflows/clippy.yml)
+[![Docker Build + Push](https://github.com/cooperlees/mcp_info_server/actions/workflows/docker.yml/badge.svg)](https://github.com/cooperlees/mcp_info_server/actions/workflows/docker.yml)
+
+A small Rust server that exposes [cooperlees.com](https://cooperlees.com)'s
+blog posts, pages, and Cooper's resume two ways from one process: as **MCP
+tools** (for LLM clients like Claude) and as a **plain HTTP route** (for
+`curl` / sharing a link). Everything it serves is already public content —
+the endpoint itself is intentionally unauthenticated.
+
+Deployed at **https://mcp.cooperlees.com** — see
+[Deployment](#deployment) for how it gets there.
+
+## What it exposes
+
+### MCP tools (`POST /mcp`, Streamable HTTP transport)
+
+| Tool | Description |
+|---|---|
+| `list_posts(page?, per_page?)` | Paginated list of blog posts (summary + excerpt as Markdown) |
+| `get_post(slug)` | A single post, full content as Markdown |
+| `list_pages(page?, per_page?)` | Paginated list of static pages |
+| `get_page(slug)` | A single page, full content as Markdown |
+| `get_resume()` | Cooper's resume, rendered as Markdown |
+
+Point any Streamable HTTP-capable MCP client at `https://mcp.cooperlees.com/mcp`
+— no auth headers, no OAuth handshake. For Claude Code:
+
+```bash
+claude mcp add --transport http mcp_info_server https://mcp.cooperlees.com/mcp
+```
+
+### Plain HTTP routes
+
+| Route | Description |
+|---|---|
+| `GET /coopers-resume` | The same rendered resume `get_resume` returns, as `text/markdown` — no MCP client needed |
+| `GET /healthz` | Liveness check, always `200` |
+
+## How it works
+
+- **WordPress content** (`list_posts`/`get_post`/`list_pages`/`get_page`) is
+  fetched from cooperlees.com's stock [WP REST API](https://developer.wordpress.org/rest-api/)
+  (`/wp-json/wp/v2/posts`, `/pages`) — no plugin or auth required, since the
+  content is already 100% public.
+- **The resume** is fetched from its Google Doc's HTML export
+  (`/export?format=html`), then converted to Markdown: the raw HTML is
+  parsed, decorative spacer `<img>` tags are stripped, `display:none`
+  elements are dropped (this WordPress install's Markdown-rendering plugin
+  embeds a hidden div with the raw escaped source next to the real content —
+  without this step it'd leak into the output), and Google's
+  `/url?q=<real>&sa=...` redirect-wrapped links are unwrapped back to their
+  real target. See `src/resume.rs` / `src/html_convert.rs`.
+- Both paths share an HTTP-response cache (45 min TTL, keyed by URL); the
+  resume additionally has its own fully-rendered-document cache (1 min TTL)
+  on top, so a burst of calls — an MCP tool call followed moments later by a
+  human hitting `/coopers-resume` — shares one render instead of
+  re-fetching/re-parsing each time.
+- HTML parsing and Markdown conversion (CPU-bound) run via
+  `tokio::task::spawn_blocking` so they never stall the async runtime under
+  load.
+
+## Deployment
+
+Built as a Docker image (`cooperlees/mcp_info_server` on Docker Hub, built
+and pushed by [`.github/workflows/docker.yml`](.github/workflows/docker.yml)
+on every push to `main`) and deployed by the
+[`mcp_info_server` role](https://github.com/cooperlees/clc_ansible/tree/main/roles/mcp_info_server)
+in the [clc_ansible](https://github.com/cooperlees/clc_ansible) repo, which
+this repo has no dependency on beyond that — it's a plain container that
+takes its config from env vars.
+
+```
+                          ┌─────────────────────────────┐
+  Internet ── HTTPS ──▶   │  Traefik (godaddy certresolver)│
+  mcp.cooperlees.com      │  Host(`mcp.cooperlees.com`)  │
+                          └──────────────┬───────────────┘
+                                         │ routable_net (10.251.254.0/24)
+                                         ▼
+                          ┌─────────────────────────────┐
+                          │   mcp_info_server container  │
+                          │   :6969 — /mcp /coopers-resume│
+                          │   /healthz                    │
+                          │   cpus: 1, memory: 256m       │
+                          └──────────────┬───────────────┘
+                                         │ HTTPS, outbound only
+                              ┌──────────┴───────────┐
+                              ▼                       ▼
+                     cooperlees.com            docs.google.com
+                     (WP REST API)             (resume export)
+```
+
+On the VPS it runs on Docker's `routable_net` with a static IPv4/IPv6 pair,
+routed purely by Traefik docker labels (`traefik.http.routers.mcp...`) —
+same pattern as every other service on that host (`wordpress`, `prometheus`,
+etc). TLS is issued via the same shared `godaddy` DNS-01 certresolver. There
+is deliberately no basicauth middleware in front of it: the content is
+public and Streamable HTTP doesn't have a built-in auth mechanism most MCP
+clients could negotiate anyway.
+
+## Configuration
+
+All via environment variables, all optional — every one has a working
+default:
+
+| Variable | Default | Notes |
+|---|---|---|
+| `WORDPRESS_URL` | `https://cooperlees.com` | Base URL for the WP REST API |
+| `RESUME_DOC_ID` | Cooper's resume doc ID | The Google Doc ID (the `.../d/<ID>/edit` part) |
+| `LISTEN_PORT` | `6969` | |
+| `ALLOWED_HOSTS` | `localhost,127.0.0.1,::1` | Comma-separated `Host` header allowlist — rmcp's Streamable HTTP transport rejects any request whose `Host` isn't in this list (DNS-rebinding protection). **A public deployment must add its own hostname here or every real request gets a 403** — the ansible role sets this to `mcp.cooperlees.com,localhost,127.0.0.1,::1`. |
+
+None of this is secret — no vault entry needed for deployment.
+
+## Running locally
+
+```bash
+cargo run
+# or, against a local WordPress/whatever:
+WORDPRESS_URL=http://localhost:8888 cargo run
+```
+
+```bash
+docker build -t mcp_info_server:latest .
+docker run --rm -p 6969:6969 mcp_info_server:latest
+curl http://localhost:6969/healthz
+curl http://localhost:6969/coopers-resume
+```
+
+Point the [MCP inspector](https://github.com/modelcontextprotocol/inspector)
+at a running instance:
+
+```bash
+npx @modelcontextprotocol/inspector http://localhost:6969/mcp
+# or, non-interactively:
+npx @modelcontextprotocol/inspector --cli http://localhost:6969/mcp --method tools/list
+```
+
+## Testing
+
+```bash
+cargo fmt --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test
+```
+
+Tests are colocated with the code they cover (`#[cfg(test)] mod tests` in
+each module) and run against `mockito`-mocked HTTP, except
+`src/resume.rs`'s conversion tests, which run against a real, committed
+fixture of the resume's HTML export (`tests/fixtures/resume_export.html`) so
+the Markdown-conversion logic is checked against actual Google Docs export
+markup, not a hand-simplified stand-in.
+
+## Architecture
+
+```
+src/main.rs           axum wiring, config from env, graceful shutdown
+src/state.rs          AppState (reqwest client + caches), AppError
+src/mcp_server.rs      InfoServer — the #[tool_router] exposing the 5 MCP tools
+src/wordpress.rs       WP REST API client + typed post/page structs
+src/resume.rs          Google Doc fetch + table-walk → Markdown conversion
+src/html_convert.rs     shared HTML cleanup (strip hidden/decorative elements,
+                        unwrap Google redirect links) + htmd Markdown conversion
+src/resume_route.rs     plain GET /coopers-resume handler, reuses resume.rs
+```
+
+Built with [`rmcp`](https://github.com/modelcontextprotocol/rust-sdk) (the
+official Rust MCP SDK) via its `StreamableHttpService`, mounted into a
+normal [`axum`](https://github.com/tokio-rs/axum) router alongside the plain
+HTTP routes — one binary, one port, one `axum::serve` call.
