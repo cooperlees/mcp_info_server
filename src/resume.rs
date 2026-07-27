@@ -84,9 +84,11 @@ fn convert_via_table(document: &Html) -> Result<Option<Vec<String>>, AppError> {
 /// hitting `/coopers-resume` moments later) share one render.
 pub async fn get_resume(state: &AppState) -> Result<ResumeDocument, AppError> {
     let cache = state.resume_cache.clone();
+    let metrics = state.metrics.clone();
     let state = state.clone();
-    cache
-        .try_get_with((), async move {
+    let entry = cache
+        .entry(())
+        .or_try_insert_with(async move {
             let source_url = export_url(state.resume_base_url(), &state.resume_doc_id);
             let raw_html = state.fetch_cached(&source_url).await?;
             let markdown = tokio::task::spawn_blocking(move || convert_resume_html(&raw_html))
@@ -101,7 +103,9 @@ pub async fn get_resume(state: &AppState) -> Result<ResumeDocument, AppError> {
             })
         })
         .await
-        .map_err(unwrap_cache_error)
+        .map_err(unwrap_cache_error)?;
+    metrics.record_cache("resume", !entry.is_fresh());
+    Ok(entry.into_value())
 }
 
 #[cfg(test)]

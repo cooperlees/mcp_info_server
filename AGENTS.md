@@ -41,12 +41,27 @@ existing tone: the terse "MCP" figlet header, a one-line Cooper-Lees-flavored in
 public/no-auth), then a plain `Routes:` list — no extra decorative ASCII beyond the header, it reads
 better plain.
 
+## Keep new tools/routes instrumented
+
+Every MCP tool call and every HTTP route already gets metrics for free — a new tool added inside
+the `#[tool_router] impl InfoServer` block only needs to call `self.instrumented("tool_name", ...)`
+(see any existing tool method in `src/mcp_server.rs`) to get `tool_calls_total` and
+`tool_call_duration_seconds` with zero extra code; a new plain HTTP route only needs `.route(...)`
+added before the existing `.route_layer(...)` call in `main.rs` to get `http_requests_total` and
+`http_request_duration_seconds` automatically. **Don't hand-roll per-endpoint counters** — if the
+existing helper/middleware doesn't cover a new case, extend it rather than adding a one-off. Also
+update the metrics table in `README.md`'s Metrics section and, if it's a new cache, wire it through
+`Metrics::record_cache` the same way `state.rs`/`resume.rs` do.
+
 ## Architecture
 
 ```
-src/main.rs           axum wiring, config from env, graceful shutdown, / and /healthz handlers
-src/state.rs           AppState (reqwest client + caches), AppError
-src/mcp_server.rs       InfoServer — the #[tool_router] exposing the MCP tools
+src/main.rs           axum wiring, config from env, graceful shutdown, the one HTTP-metrics
+                      middleware layer covering every route
+src/state.rs           AppState (reqwest client + caches + Metrics), AppError
+src/metrics.rs          Prometheus registry + counters/histograms, /metrics render
+src/mcp_server.rs       InfoServer — the #[tool_router] exposing the MCP tools, each one line
+                       of `self.instrumented("name", ...)`
 src/wordpress.rs        WP REST API client + typed post/page structs
 src/resume.rs           Google Doc fetch + table-walk → Markdown conversion
 src/html_convert.rs      shared HTML cleanup (strip hidden/decorative elements, unwrap Google

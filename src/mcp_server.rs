@@ -1,3 +1,5 @@
+use std::future::Future;
+
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{ServerCapabilities, ServerInfo};
@@ -5,7 +7,7 @@ use rmcp::{Json, ServerHandler, tool, tool_handler, tool_router};
 use serde::Serialize;
 
 use crate::resume::{self, ResumeDocument};
-use crate::state::AppState;
+use crate::state::{AppError, AppState};
 use crate::wordpress::{
     self, ListRequest, PageDetail, PageSummary, PostDetail, PostSummary, SlugRequest,
 };
@@ -36,6 +38,44 @@ impl InfoServer {
             tool_router: Self::tool_router(),
         }
     }
+
+    /// Times `fut`, records `mcp_info_server_tool_call_duration_seconds` and
+    /// `mcp_info_server_tool_calls_total{tool, result}` for it, and — on
+    /// failure — `mcp_info_server_errors_total` too. Every tool method is
+    /// just one call to this, so none of them repeat the instrumentation.
+    async fn instrumented<T, F>(&self, tool: &str, fut: F) -> Result<Json<T>, String>
+    where
+        F: Future<Output = Result<T, AppError>>,
+    {
+        let timer = self
+            .state
+            .metrics
+            .tool_call_duration_seconds
+            .with_label_values(&[tool])
+            .start_timer();
+        let result = fut.await;
+        timer.observe_duration();
+
+        match result {
+            Ok(value) => {
+                self.state
+                    .metrics
+                    .tool_calls_total
+                    .with_label_values(&[tool, "ok"])
+                    .inc();
+                Ok(Json(value))
+            }
+            Err(err) => {
+                self.state
+                    .metrics
+                    .tool_calls_total
+                    .with_label_values(&[tool, "error"])
+                    .inc();
+                self.state.metrics.record_error(&err);
+                Err(err.to_string())
+            }
+        }
+    }
 }
 
 #[tool_router(router = tool_router)]
@@ -45,10 +85,12 @@ impl InfoServer {
         &self,
         Parameters(req): Parameters<ListRequest>,
     ) -> Result<Json<PostListResult>, String> {
-        wordpress::list_posts(&self.state, req)
-            .await
-            .map(|posts| Json(PostListResult { posts }))
-            .map_err(|e| e.to_string())
+        self.instrumented("list_posts", async {
+            wordpress::list_posts(&self.state, req)
+                .await
+                .map(|posts| PostListResult { posts })
+        })
+        .await
     }
 
     #[tool(
@@ -58,10 +100,8 @@ impl InfoServer {
         &self,
         Parameters(SlugRequest { slug }): Parameters<SlugRequest>,
     ) -> Result<Json<PostDetail>, String> {
-        wordpress::get_post(&self.state, &slug)
+        self.instrumented("get_post", wordpress::get_post(&self.state, &slug))
             .await
-            .map(Json)
-            .map_err(|e| e.to_string())
     }
 
     #[tool(description = "List cooperlees.com static pages, paginated.")]
@@ -69,10 +109,12 @@ impl InfoServer {
         &self,
         Parameters(req): Parameters<ListRequest>,
     ) -> Result<Json<PageListResult>, String> {
-        wordpress::list_pages(&self.state, req)
-            .await
-            .map(|pages| Json(PageListResult { pages }))
-            .map_err(|e| e.to_string())
+        self.instrumented("list_pages", async {
+            wordpress::list_pages(&self.state, req)
+                .await
+                .map(|pages| PageListResult { pages })
+        })
+        .await
     }
 
     #[tool(
@@ -82,18 +124,14 @@ impl InfoServer {
         &self,
         Parameters(SlugRequest { slug }): Parameters<SlugRequest>,
     ) -> Result<Json<PageDetail>, String> {
-        wordpress::get_page(&self.state, &slug)
+        self.instrumented("get_page", wordpress::get_page(&self.state, &slug))
             .await
-            .map(Json)
-            .map_err(|e| e.to_string())
     }
 
     #[tool(description = "Get Cooper Lees' resume, rendered as Markdown.")]
     async fn get_resume(&self) -> Result<Json<ResumeDocument>, String> {
-        resume::get_resume(&self.state)
+        self.instrumented("get_resume", resume::get_resume(&self.state))
             .await
-            .map(Json)
-            .map_err(|e| e.to_string())
     }
 }
 
@@ -138,5 +176,42 @@ mod tests {
                 "missing tool {expected:?} in {names:?}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn instrumented_records_ok_result_and_duration() {
+        let server = test_server();
+        let result: Result<Json<u32>, String> =
+            server.instrumented("dummy_tool", async { Ok(7u32) }).await;
+        assert_eq!(result.unwrap().0, 7);
+
+        let body = server.state.metrics.render().unwrap();
+        assert!(
+            body.contains(r#"mcp_info_server_tool_calls_total{result="ok",tool="dummy_tool"} 1"#)
+        );
+        assert!(
+            body.contains(
+                "mcp_info_server_tool_call_duration_seconds_count{tool=\"dummy_tool\"} 1"
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn instrumented_records_error_result_and_error_kind() {
+        let server = test_server();
+        let result: Result<Json<u32>, String> = server
+            .instrumented("dummy_tool", async {
+                Err(AppError::NotFound("x".to_owned()))
+            })
+            .await;
+        assert!(result.is_err());
+
+        let body = server.state.metrics.render().unwrap();
+        assert!(
+            body.contains(
+                r#"mcp_info_server_tool_calls_total{result="error",tool="dummy_tool"} 1"#
+            )
+        );
+        assert!(body.contains(r#"mcp_info_server_errors_total{kind="not_found"} 1"#));
     }
 }

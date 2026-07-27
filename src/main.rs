@@ -1,5 +1,6 @@
 mod html_convert;
 mod mcp_server;
+mod metrics;
 mod resume;
 mod resume_route;
 mod state;
@@ -8,7 +9,10 @@ mod wordpress;
 use std::sync::Arc;
 
 use axum::Router;
-use axum::http::StatusCode;
+use axum::extract::{MatchedPath, State};
+use axum::http::{HeaderMap, Request, StatusCode};
+use axum::middleware::{self, Next};
+use axum::response::Response;
 use axum::routing::get;
 use rmcp::transport::StreamableHttpServerConfig;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
@@ -82,6 +86,11 @@ async fn main() -> Result<(), AppError> {
         .route("/", get(root))
         .route("/coopers-resume", get(resume_route::coopers_resume))
         .route("/healthz", get(healthz))
+        .route("/metrics", get(metrics_handler))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            track_http_metrics,
+        ))
         .with_state(state);
 
     let addr = format!("0.0.0.0:{}", config.listen_port);
@@ -97,6 +106,58 @@ async fn main() -> Result<(), AppError> {
         .map_err(|e| AppError::Other(format!("server error: {e}")))?;
 
     Ok(())
+}
+
+/// Records `mcp_info_server_http_requests_total` and
+/// `_http_request_duration_seconds` for every request, labeled by the
+/// matched route template (never the raw path — `/mcp` carries every MCP
+/// tool call, so per-tool breakdowns come from `mcp_server.rs`'s own
+/// instrumentation instead of by route here).
+async fn track_http_metrics(
+    State(state): State<AppState>,
+    matched_path: Option<MatchedPath>,
+    req: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    let method = req.method().to_string();
+    let route = matched_path
+        .as_ref()
+        .map(MatchedPath::as_str)
+        .unwrap_or("unmatched")
+        .to_owned();
+
+    let timer = state
+        .metrics
+        .http_request_duration_seconds
+        .with_label_values(&[&route, &method])
+        .start_timer();
+    let response = next.run(req).await;
+    timer.observe_duration();
+
+    let status = response.status().as_u16().to_string();
+    state
+        .metrics
+        .http_requests_total
+        .with_label_values(&[&route, &method, &status])
+        .inc();
+    response
+}
+
+async fn metrics_handler(
+    State(state): State<AppState>,
+) -> Result<(HeaderMap, String), (StatusCode, String)> {
+    state
+        .metrics
+        .render()
+        .map(|body| {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                axum::http::header::CONTENT_TYPE,
+                prometheus::TEXT_FORMAT.parse().expect("valid header value"),
+            );
+            (headers, body)
+        })
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 
 const BANNER: &str = r#"
@@ -117,6 +178,7 @@ const BANNER: &str = r#"
                            get_page, get_resume
     GET  /coopers-resume   Cooper's resume, rendered as Markdown
     GET  /healthz          Liveness check
+    GET  /metrics          Prometheus metrics
 
   https://github.com/cooperlees/mcp_info_server
 "#;

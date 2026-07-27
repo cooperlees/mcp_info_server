@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use moka::future::Cache;
 
+use crate::metrics::Metrics;
 use crate::resume::ResumeDocument;
 
 /// Errors surfaced by fetch/convert paths, always rendered to callers as plain text.
@@ -18,6 +19,19 @@ pub enum AppError {
     NotFound(String),
     #[error("{0}")]
     Other(String),
+}
+
+impl AppError {
+    /// A low-cardinality label for the `mcp_info_server_errors_total` metric.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            AppError::Request(_) => "request",
+            AppError::Json(_) => "json",
+            AppError::HtmlConvert(_) => "html_convert",
+            AppError::NotFound(_) => "not_found",
+            AppError::Other(_) => "other",
+        }
+    }
 }
 
 /// Unwrap the `Arc<AppError>` moka's `try_get_with` returns on a failed cache
@@ -40,6 +54,7 @@ pub struct AppState {
     pub http: reqwest::Client,
     pub wordpress_url: String,
     pub resume_doc_id: String,
+    pub metrics: Metrics,
     resume_base_url: String,
     http_cache: Cache<String, Arc<str>>,
     pub(crate) resume_cache: Cache<(), ResumeDocument>,
@@ -54,6 +69,7 @@ impl AppState {
             http,
             wordpress_url,
             resume_doc_id,
+            metrics: Metrics::new(),
             resume_base_url: "https://docs.google.com".to_owned(),
             http_cache: Cache::builder().time_to_live(HTTP_CACHE_TTL).build(),
             resume_cache: Cache::builder().time_to_live(RESUME_CACHE_TTL).build(),
@@ -75,8 +91,10 @@ impl AppState {
     pub async fn fetch_cached(&self, url: &str) -> Result<Arc<str>, AppError> {
         let http = self.http.clone();
         let url_owned = url.to_owned();
-        self.http_cache
-            .try_get_with(url_owned.clone(), async move {
+        let entry = self
+            .http_cache
+            .entry(url_owned.clone())
+            .or_try_insert_with(async move {
                 let body = http
                     .get(&url_owned)
                     .send()
@@ -87,7 +105,9 @@ impl AppState {
                 Ok::<Arc<str>, AppError>(Arc::from(body))
             })
             .await
-            .map_err(unwrap_cache_error)
+            .map_err(unwrap_cache_error)?;
+        self.metrics.record_cache("http", !entry.is_fresh());
+        Ok(entry.into_value())
     }
 }
 

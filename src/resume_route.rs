@@ -16,7 +16,10 @@ pub async fn coopers_resume(State(state): State<AppState>) -> impl IntoResponse 
             doc.markdown,
         )
             .into_response(),
-        Err(err) => (StatusCode::BAD_GATEWAY, err.to_string()).into_response(),
+        Err(err) => {
+            state.metrics.record_error(&err);
+            (StatusCode::BAD_GATEWAY, err.to_string()).into_response()
+        }
     }
 }
 

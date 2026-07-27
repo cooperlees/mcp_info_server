@@ -37,6 +37,7 @@ per client).
 | `GET /` | ASCII-art landing page listing available routes/tools |
 | `GET /coopers-resume` | The same rendered resume `get_resume` returns, as `text/markdown` — no MCP client needed |
 | `GET /healthz` | Liveness check, always `200`, body `Ok` |
+| `GET /metrics` | Prometheus metrics (see [Metrics](#metrics)) |
 
 ## Connecting an LLM TUI
 
@@ -206,12 +207,34 @@ fixture of the resume's HTML export (`tests/fixtures/resume_export.html`) so
 the Markdown-conversion logic is checked against actual Google Docs export
 markup, not a hand-simplified stand-in.
 
+## Metrics
+
+`GET /metrics` exposes Prometheus text-format metrics, all prefixed `mcp_info_server_`:
+
+| Metric | Type | Labels | What it's for |
+|---|---|---|---|
+| `http_requests_total` | counter | `route`, `method`, `status` | Requests per HTTP route (`/`, `/mcp`, `/coopers-resume`, `/healthz`, `/metrics`) |
+| `http_request_duration_seconds` | histogram | `route`, `method` | Latency per HTTP route |
+| `tool_calls_total` | counter | `tool`, `result` (`ok`/`error`) | Calls per MCP tool — since all 5 tools share the one `/mcp` route, this is where the per-tool breakdown actually lives |
+| `tool_call_duration_seconds` | histogram | `tool` | Latency per MCP tool |
+| `cache_requests_total` | counter | `cache` (`http`/`resume`), `result` (`hit`/`miss`) | Hit/miss rate for both cache layers (see [How it works](#how-it-works)) |
+| `errors_total` | counter | `kind` (`request`/`json`/`html_convert`/`not_found`/`other`) | Every `AppError`, regardless of whether it surfaced as an HTTP 502 or an MCP tool error |
+
+These are deliberately raw counters/histograms, not pre-aggregated 1-minute/5-minute/1-hour
+numbers — that windowing is exactly what PromQL's `rate()`/`increase()` do at query time
+(`rate(mcp_info_server_tool_calls_total[5m])`), so the Grafana dashboard has one panel per
+metric with the range picker doing the window selection, rather than three near-duplicate
+exported metrics per thing being measured.
+
 ## Architecture
 
 ```
-src/main.rs           axum wiring, config from env, graceful shutdown
-src/state.rs          AppState (reqwest client + caches), AppError
-src/mcp_server.rs      InfoServer — the #[tool_router] exposing the 5 MCP tools
+src/main.rs           axum wiring, config from env, graceful shutdown, the
+                      one HTTP-metrics middleware layer covering every route
+src/state.rs          AppState (reqwest client + caches + Metrics), AppError
+src/metrics.rs         Prometheus registry + counters/histograms, /metrics render
+src/mcp_server.rs      InfoServer — the #[tool_router] exposing the 5 MCP tools,
+                       each one line of `self.instrumented("name", ...)`
 src/wordpress.rs       WP REST API client + typed post/page structs
 src/resume.rs          Google Doc fetch + table-walk → Markdown conversion
 src/html_convert.rs     shared HTML cleanup (strip hidden/decorative elements,
