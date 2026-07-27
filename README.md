@@ -26,11 +26,9 @@ Deployed at **https://mcp.cooperlees.com** — see
 | `get_resume()` | Cooper's resume, rendered as Markdown |
 
 Point any Streamable HTTP-capable MCP client at `https://mcp.cooperlees.com/mcp`
-— no auth headers, no OAuth handshake. For Claude Code:
-
-```bash
-claude mcp add --transport http mcp_info_server https://mcp.cooperlees.com/mcp
-```
+— no auth headers, no OAuth handshake required (see
+[Connecting an LLM TUI](#connecting-an-llm-tui) below for the exact command
+per client).
 
 ### Plain HTTP routes
 
@@ -38,6 +36,57 @@ claude mcp add --transport http mcp_info_server https://mcp.cooperlees.com/mcp
 |---|---|
 | `GET /coopers-resume` | The same rendered resume `get_resume` returns, as `text/markdown` — no MCP client needed |
 | `GET /healthz` | Liveness check, always `200` |
+
+## Connecting an LLM TUI
+
+The server is public and unauthenticated, so every client below just needs
+the URL — no token, no header, no OAuth step.
+
+**Claude Code**
+
+```bash
+claude mcp add --transport http mcp_info_server https://mcp.cooperlees.com/mcp
+```
+
+Verify with `/mcp` inside a session, or `claude mcp list` from the shell.
+Start a *new* session after adding it — an already-running one won't pick it
+up.
+
+**OpenAI Codex CLI**
+
+```bash
+codex mcp add mcp_info_server --url https://mcp.cooperlees.com/mcp
+```
+
+Verify with `codex mcp list`, or `/mcp` inside a session. Equivalent manual
+config, in `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.mcp_info_server]
+url = "https://mcp.cooperlees.com/mcp"
+```
+
+**Google Gemini CLI**
+
+```bash
+gemini mcp add --transport http mcp_info_server https://mcp.cooperlees.com/mcp
+```
+
+Equivalent manual config, in `~/.gemini/settings.json`:
+
+```json
+{
+  "mcpServers": {
+    "mcp_info_server": {
+      "httpUrl": "https://mcp.cooperlees.com/mcp"
+    }
+  }
+}
+```
+
+In any of the three, you don't need to name a tool directly — just ask in
+plain language, e.g. *"show me my resume"* or *"what blog posts do you
+have?"*, and the client will invoke `get_resume` / `list_posts` on its own.
 
 ## How it works
 
@@ -77,7 +126,7 @@ takes its config from env vars.
   Internet ── HTTPS ──▶   │  Traefik (godaddy certresolver)│
   mcp.cooperlees.com      │  Host(`mcp.cooperlees.com`)  │
                           └──────────────┬───────────────┘
-                                         │ routable_net (10.251.254.0/24)
+                                         │ routable_net (fd00:251::/64)
                                          ▼
                           ┌─────────────────────────────┐
                           │   mcp_info_server container  │
@@ -92,13 +141,16 @@ takes its config from env vars.
                      (WP REST API)             (resume export)
 ```
 
-On the VPS it runs on Docker's `routable_net` with a static IPv4/IPv6 pair,
-routed purely by Traefik docker labels (`traefik.http.routers.mcp...`) —
-same pattern as every other service on that host (`wordpress`, `prometheus`,
-etc). TLS is issued via the same shared `godaddy` DNS-01 certresolver. There
-is deliberately no basicauth middleware in front of it: the content is
-public and Streamable HTTP doesn't have a built-in auth mechanism most MCP
-clients could negotiate anyway.
+On the VPS it runs on Docker's `routable_net`, routed purely by Traefik
+docker labels (`traefik.http.routers.mcp...`) — same pattern as every other
+service on that host (`wordpress`, `prometheus`, etc). IPv6 is preferred
+throughout this stack wherever it's viable; `routable_net` is dual-stack
+(routing + DNS both keep an IPv4 address around for compatibility), but
+IPv6 is the addressing shown here since it's what the network is built
+around. TLS is issued via the same shared `godaddy` DNS-01 certresolver.
+There is deliberately no basicauth middleware in front of it: the content
+is public and Streamable HTTP doesn't have a built-in auth mechanism most
+MCP clients could negotiate anyway.
 
 ## Configuration
 
