@@ -45,23 +45,35 @@ pub(crate) fn unwrap_cache_error(err: Arc<AppError>) -> AppError {
 
 const HTTP_CACHE_TTL: Duration = Duration::from_secs(45 * 60);
 const RESUME_CACHE_TTL: Duration = Duration::from_secs(60);
+/// Countdown data changes every second by design (`seconds_remaining`), so it
+/// gets a much shorter cache than the WordPress/resume content — long enough
+/// to absorb a burst of calls, short enough that "how long until X" stays
+/// meaningfully live.
+const COUNTDOWN_CACHE_TTL: Duration = Duration::from_secs(30);
 
 /// Shared server state: one HTTP client, a cache of raw upstream response
-/// bodies (WordPress JSON, the resume HTML export) keyed by URL, and a
-/// short-lived cache of the fully-rendered resume document.
+/// bodies (WordPress JSON, the resume HTML export) keyed by URL, a
+/// short-lived cache of the fully-rendered resume document, and an even
+/// shorter-lived cache of the countdown API's raw JSON.
 #[derive(Clone)]
 pub struct AppState {
     pub http: reqwest::Client,
     pub wordpress_url: String,
     pub resume_doc_id: String,
+    pub countdown_url: String,
     pub metrics: Metrics,
     resume_base_url: String,
     http_cache: Cache<String, Arc<str>>,
     pub(crate) resume_cache: Cache<(), ResumeDocument>,
+    countdown_cache: Cache<String, Arc<str>>,
 }
 
 impl AppState {
-    pub fn new(wordpress_url: String, resume_doc_id: String) -> Result<Self, AppError> {
+    pub fn new(
+        wordpress_url: String,
+        resume_doc_id: String,
+        countdown_url: String,
+    ) -> Result<Self, AppError> {
         let http = reqwest::Client::builder()
             .user_agent(concat!("mcp_info_server/", env!("CARGO_PKG_VERSION")))
             .build()?;
@@ -69,10 +81,12 @@ impl AppState {
             http,
             wordpress_url,
             resume_doc_id,
+            countdown_url,
             metrics: Metrics::new(),
             resume_base_url: "https://docs.google.com".to_owned(),
             http_cache: Cache::builder().time_to_live(HTTP_CACHE_TTL).build(),
             resume_cache: Cache::builder().time_to_live(RESUME_CACHE_TTL).build(),
+            countdown_cache: Cache::builder().time_to_live(COUNTDOWN_CACHE_TTL).build(),
         })
     }
 
@@ -109,6 +123,33 @@ impl AppState {
         self.metrics.record_cache("http", !entry.is_fresh());
         Ok(entry.into_value())
     }
+
+    /// Fetch the countdown API's JSON body, serving from the short-lived
+    /// countdown cache when available. Separate from `fetch_cached` because
+    /// this upstream content-negotiates on `Accept` (it serves an HTML page
+    /// by default) and needs a much shorter TTL to stay meaningfully live.
+    pub async fn fetch_countdown_cached(&self, url: &str) -> Result<Arc<str>, AppError> {
+        let http = self.http.clone();
+        let url_owned = url.to_owned();
+        let entry = self
+            .countdown_cache
+            .entry(url_owned.clone())
+            .or_try_insert_with(async move {
+                let body = http
+                    .get(&url_owned)
+                    .header(reqwest::header::ACCEPT, "application/json")
+                    .send()
+                    .await?
+                    .error_for_status()?
+                    .text()
+                    .await?;
+                Ok::<Arc<str>, AppError>(Arc::from(body))
+            })
+            .await
+            .map_err(unwrap_cache_error)?;
+        self.metrics.record_cache("countdown", !entry.is_fresh());
+        Ok(entry.into_value())
+    }
 }
 
 #[cfg(test)]
@@ -126,7 +167,7 @@ mod tests {
             .create_async()
             .await;
 
-        let state = AppState::new(server.url(), "unused".to_owned()).unwrap();
+        let state = AppState::new(server.url(), "unused".to_owned(), "unused".to_owned()).unwrap();
         let url = format!("{}/thing", server.url());
 
         let first = state.fetch_cached(&url).await.unwrap();
@@ -146,10 +187,33 @@ mod tests {
             .create_async()
             .await;
 
-        let state = AppState::new(server.url(), "unused".to_owned()).unwrap();
+        let state = AppState::new(server.url(), "unused".to_owned(), "unused".to_owned()).unwrap();
         let url = format!("{}/missing", server.url());
 
         let err = state.fetch_cached(&url).await.unwrap_err();
         assert!(matches!(err, AppError::Other(_) | AppError::Request(_)));
+    }
+
+    #[tokio::test]
+    async fn fetch_countdown_cached_sends_accept_json_and_serves_repeats_from_cache() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/")
+            .match_header("accept", "application/json")
+            .with_status(200)
+            .with_body("{}")
+            .expect(1)
+            .create_async()
+            .await;
+
+        let state = AppState::new("unused".to_owned(), "unused".to_owned(), server.url()).unwrap();
+        let url = format!("{}/", server.url());
+
+        let first = state.fetch_countdown_cached(&url).await.unwrap();
+        let second = state.fetch_countdown_cached(&url).await.unwrap();
+
+        assert_eq!(&*first, "{}");
+        assert_eq!(&*second, "{}");
+        mock.assert_async().await;
     }
 }

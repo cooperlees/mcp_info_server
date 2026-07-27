@@ -24,6 +24,8 @@ Deployed at **https://mcp.cooperlees.com** — see
 | `list_pages(page?, per_page?)` | Paginated list of static pages |
 | `get_page(slug)` | A single page, full content as Markdown |
 | `get_resume()` | Cooper's resume, rendered as Markdown |
+| `list_countdowns()` | All of Cooper's [countdown.cooperlees.com](https://countdown.cooperlees.com) events (trips, birthdays, weddings, etc), soonest first, with live time-remaining |
+| `get_countdown(slug)` | A single countdown event by slug, with live time-remaining |
 
 Point any Streamable HTTP-capable MCP client at `https://mcp.cooperlees.com/mcp`
 — no auth headers, no OAuth handshake required (see
@@ -104,11 +106,18 @@ have?"*, and the client will invoke `get_resume` / `list_posts` on its own.
   without this step it'd leak into the output), and Google's
   `/url?q=<real>&sa=...` redirect-wrapped links are unwrapped back to their
   real target. See `src/resume.rs` / `src/html_convert.rs`.
-- Both paths share an HTTP-response cache (45 min TTL, keyed by URL); the
-  resume additionally has its own fully-rendered-document cache (1 min TTL)
-  on top, so a burst of calls — an MCP tool call followed moments later by a
-  human hitting `/coopers-resume` — shares one render instead of
-  re-fetching/re-parsing each time.
+- **Countdown data** is fetched from countdown.cooperlees.com's own JSON API
+  (it content-negotiates on `Accept: application/json` — no header, and it
+  serves its HTML page instead), already pre-computed (`seconds_remaining`,
+  a `years/days/hours/minutes/seconds` breakdown, a human string like `"4d to
+  go"`) — no conversion needed. See `src/countdown.rs`.
+- The WordPress/resume paths share an HTTP-response cache (45 min TTL, keyed
+  by URL); the resume additionally has its own fully-rendered-document cache
+  (1 min TTL) on top, so a burst of calls — an MCP tool call followed
+  moments later by a human hitting `/coopers-resume` — shares one render
+  instead of re-fetching/re-parsing each time. Countdown data gets its own
+  much shorter cache (30s TTL) instead, since `seconds_remaining` changes
+  every second by design and a 45-minute-stale countdown isn't useful.
 - HTML parsing and Markdown conversion (CPU-bound) run via
   `tokio::task::spawn_blocking` so they never stall the async runtime under
   load.
@@ -137,10 +146,10 @@ takes its config from env vars.
                           │   cpus: 1, memory: 256m       │
                           └──────────────┬───────────────┘
                                          │ HTTPS, outbound only
-                              ┌──────────┴───────────┐
-                              ▼                       ▼
-                     cooperlees.com            docs.google.com
-                     (WP REST API)             (resume export)
+                        ┌────────────────┼────────────────┐
+                        ▼                ▼                ▼
+               cooperlees.com    docs.google.com   countdown.cooperlees.com
+               (WP REST API)     (resume export)   (countdown JSON API)
 ```
 
 On the VPS it runs on Docker's `routable_net`, routed purely by Traefik
@@ -163,6 +172,7 @@ default:
 |---|---|---|
 | `WORDPRESS_URL` | `https://cooperlees.com` | Base URL for the WP REST API |
 | `RESUME_DOC_ID` | Cooper's resume doc ID | The Google Doc ID (the `.../d/<ID>/edit` part) |
+| `COUNTDOWN_URL` | `https://countdown.cooperlees.com` | Base URL for the countdown JSON API |
 | `LISTEN_PORT` | `6969` | |
 | `ALLOWED_HOSTS` | `localhost,127.0.0.1,::1` | Comma-separated `Host` header allowlist — rmcp's Streamable HTTP transport rejects any request whose `Host` isn't in this list (DNS-rebinding protection). **A public deployment must add its own hostname here or every real request gets a 403** — the ansible role sets this to `mcp.cooperlees.com,localhost,127.0.0.1,::1`. |
 
@@ -215,9 +225,9 @@ markup, not a hand-simplified stand-in.
 |---|---|---|---|
 | `http_requests_total` | counter | `route`, `method`, `status` | Requests per HTTP route (`/`, `/mcp`, `/coopers-resume`, `/healthz`, `/metrics`) |
 | `http_request_duration_seconds` | histogram | `route`, `method` | Latency per HTTP route |
-| `tool_calls_total` | counter | `tool`, `result` (`ok`/`error`) | Calls per MCP tool — since all 5 tools share the one `/mcp` route, this is where the per-tool breakdown actually lives |
+| `tool_calls_total` | counter | `tool`, `result` (`ok`/`error`) | Calls per MCP tool — since all 7 tools share the one `/mcp` route, this is where the per-tool breakdown actually lives |
 | `tool_call_duration_seconds` | histogram | `tool` | Latency per MCP tool |
-| `cache_requests_total` | counter | `cache` (`http`/`resume`), `result` (`hit`/`miss`) | Hit/miss rate for both cache layers (see [How it works](#how-it-works)) |
+| `cache_requests_total` | counter | `cache` (`http`/`resume`/`countdown`), `result` (`hit`/`miss`) | Hit/miss rate for all three cache layers (see [How it works](#how-it-works)) |
 | `errors_total` | counter | `kind` (`request`/`json`/`html_convert`/`not_found`/`other`) | Every `AppError`, regardless of whether it surfaced as an HTTP 502 or an MCP tool error |
 
 These are deliberately raw counters/histograms, not pre-aggregated 1-minute/5-minute/1-hour
@@ -233,13 +243,14 @@ src/main.rs           axum wiring, config from env, graceful shutdown, the
                       one HTTP-metrics middleware layer covering every route
 src/state.rs          AppState (reqwest client + caches + Metrics), AppError
 src/metrics.rs         Prometheus registry + counters/histograms, /metrics render
-src/mcp_server.rs      InfoServer — the #[tool_router] exposing the 5 MCP tools,
+src/mcp_server.rs      InfoServer — the #[tool_router] exposing the 7 MCP tools,
                        each one line of `self.instrumented("name", ...)`
 src/wordpress.rs       WP REST API client + typed post/page structs
 src/resume.rs          Google Doc fetch + table-walk → Markdown conversion
 src/html_convert.rs     shared HTML cleanup (strip hidden/decorative elements,
                         unwrap Google redirect links) + htmd Markdown conversion
 src/resume_route.rs     plain GET /coopers-resume handler, reuses resume.rs
+src/countdown.rs        countdown.cooperlees.com JSON API client + typed structs
 ```
 
 Built with [`rmcp`](https://github.com/modelcontextprotocol/rust-sdk) (the

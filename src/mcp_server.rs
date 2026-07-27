@@ -6,6 +6,7 @@ use rmcp::model::{ServerCapabilities, ServerInfo};
 use rmcp::{Json, ServerHandler, tool, tool_handler, tool_router};
 use serde::Serialize;
 
+use crate::countdown::{self, Countdown, CountdownList};
 use crate::resume::{self, ResumeDocument};
 use crate::state::{AppError, AppState};
 use crate::wordpress::{
@@ -133,6 +134,30 @@ impl InfoServer {
         self.instrumented("get_resume", resume::get_resume(&self.state))
             .await
     }
+
+    #[tool(
+        description = "List all of Cooper Lees' countdown.cooperlees.com events (trips, birthdays, \
+                        weddings, etc), soonest first, each with live time-remaining."
+    )]
+    async fn list_countdowns(&self) -> Result<Json<CountdownList>, String> {
+        self.instrumented("list_countdowns", countdown::list_countdowns(&self.state))
+            .await
+    }
+
+    #[tool(
+        description = "Get a single countdown.cooperlees.com event by slug (see list_countdowns), \
+                        with live time-remaining."
+    )]
+    async fn get_countdown(
+        &self,
+        Parameters(SlugRequest { slug }): Parameters<SlugRequest>,
+    ) -> Result<Json<Countdown>, String> {
+        self.instrumented(
+            "get_countdown",
+            countdown::get_countdown(&self.state, &slug),
+        )
+        .await
+    }
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -151,12 +176,17 @@ mod tests {
 
     fn test_server() -> InfoServer {
         InfoServer::new(
-            AppState::new("https://example.invalid".to_owned(), "doc-id".to_owned()).unwrap(),
+            AppState::new(
+                "https://example.invalid".to_owned(),
+                "doc-id".to_owned(),
+                "https://example.invalid".to_owned(),
+            )
+            .unwrap(),
         )
     }
 
     #[test]
-    fn exposes_all_five_tools() {
+    fn exposes_all_seven_tools() {
         let server = test_server();
         let names: Vec<_> = server
             .tool_router
@@ -170,6 +200,8 @@ mod tests {
             "list_pages",
             "get_page",
             "get_resume",
+            "list_countdowns",
+            "get_countdown",
         ] {
             assert!(
                 names.contains(&expected.to_owned()),

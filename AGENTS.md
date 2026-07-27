@@ -67,6 +67,7 @@ src/resume.rs           Google Doc fetch + table-walk → Markdown conversion
 src/html_convert.rs      shared HTML cleanup (strip hidden/decorative elements, unwrap Google
                         redirect links) + htmd Markdown conversion
 src/resume_route.rs      plain GET /coopers-resume handler, reuses resume.rs
+src/countdown.rs         countdown.cooperlees.com JSON API client + typed structs
 ```
 
 ## Conventions

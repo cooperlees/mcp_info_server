@@ -43,7 +43,7 @@ mod tests {
             .with_body("<table><tr><td>Skills</td><td><p>Rust</p></td></tr></table>")
             .create_async()
             .await;
-        let state = AppState::new(String::new(), "doc123".to_owned())
+        let state = AppState::new(String::new(), "doc123".to_owned(), "unused".to_owned())
             .unwrap()
             .with_resume_base_url(server.url());
 
@@ -76,7 +76,7 @@ mod tests {
             .with_status(500)
             .create_async()
             .await;
-        let state = AppState::new(String::new(), "doc123".to_owned())
+        let state = AppState::new(String::new(), "doc123".to_owned(), "unused".to_owned())
             .unwrap()
             .with_resume_base_url(server.url());
 

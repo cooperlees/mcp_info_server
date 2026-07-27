@@ -1,3 +1,4 @@
+mod countdown;
 mod html_convert;
 mod mcp_server;
 mod metrics;
@@ -23,6 +24,7 @@ use crate::state::{AppError, AppState};
 
 const DEFAULT_WORDPRESS_URL: &str = "https://cooperlees.com";
 const DEFAULT_RESUME_DOC_ID: &str = "1ksWGBa1ZrGVItQybR-tVnism2E-LIGsmcdf-CDalFcw";
+const DEFAULT_COUNTDOWN_URL: &str = "https://countdown.cooperlees.com";
 const DEFAULT_LISTEN_PORT: u16 = 6969;
 /// rmcp's Streamable HTTP transport rejects requests whose `Host` header
 /// isn't in this list (DNS-rebinding protection) — it defaults to loopback
@@ -33,6 +35,7 @@ const DEFAULT_ALLOWED_HOSTS: &str = "localhost,127.0.0.1,::1";
 struct Config {
     wordpress_url: String,
     resume_doc_id: String,
+    countdown_url: String,
     listen_port: u16,
     allowed_hosts: Vec<String>,
 }
@@ -43,6 +46,8 @@ impl Config {
             std::env::var("WORDPRESS_URL").unwrap_or_else(|_| DEFAULT_WORDPRESS_URL.to_owned());
         let resume_doc_id =
             std::env::var("RESUME_DOC_ID").unwrap_or_else(|_| DEFAULT_RESUME_DOC_ID.to_owned());
+        let countdown_url =
+            std::env::var("COUNTDOWN_URL").unwrap_or_else(|_| DEFAULT_COUNTDOWN_URL.to_owned());
         let listen_port = match std::env::var("LISTEN_PORT") {
             Ok(raw) => raw.parse::<u16>().map_err(|e| {
                 AppError::Other(format!("LISTEN_PORT {raw:?} is not a valid port: {e}"))
@@ -59,6 +64,7 @@ impl Config {
         Ok(Self {
             wordpress_url,
             resume_doc_id,
+            countdown_url,
             listen_port,
             allowed_hosts,
         })
@@ -72,7 +78,11 @@ async fn main() -> Result<(), AppError> {
         .init();
 
     let config = Config::from_env()?;
-    let state = AppState::new(config.wordpress_url.clone(), config.resume_doc_id.clone())?;
+    let state = AppState::new(
+        config.wordpress_url.clone(),
+        config.resume_doc_id.clone(),
+        config.countdown_url.clone(),
+    )?;
 
     let mcp_state = state.clone();
     let mcp_service = StreamableHttpService::new(
@@ -176,7 +186,8 @@ const BANNER: &str = r#"
 
   Routes:
     POST /mcp             MCP tools: list_posts, get_post, list_pages,
-                           get_page, get_resume
+                           get_page, get_resume, list_countdowns,
+                           get_countdown
     GET  /coopers-resume   Cooper's resume, rendered as Markdown
                            (alias: /resume)
     GET  /healthz          Liveness check
