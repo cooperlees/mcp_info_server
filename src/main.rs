@@ -85,6 +85,7 @@ async fn main() -> Result<(), AppError> {
         .nest_service("/mcp", mcp_service)
         .route("/", get(root))
         .route("/coopers-resume", get(resume_route::coopers_resume))
+        .route("/resume", get(resume_route::coopers_resume))
         .route("/healthz", get(healthz))
         .route("/metrics", get(metrics_handler))
         .route_layer(middleware::from_fn_with_state(
@@ -177,6 +178,7 @@ const BANNER: &str = r#"
     POST /mcp             MCP tools: list_posts, get_post, list_pages,
                            get_page, get_resume
     GET  /coopers-resume   Cooper's resume, rendered as Markdown
+                           (alias: /resume)
     GET  /healthz          Liveness check
     GET  /metrics          Prometheus metrics
 

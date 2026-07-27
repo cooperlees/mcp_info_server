@@ -35,7 +35,7 @@ per client).
 | Route | Description |
 |---|---|
 | `GET /` | ASCII-art landing page listing available routes/tools |
-| `GET /coopers-resume` | The same rendered resume `get_resume` returns, as `text/markdown` — no MCP client needed |
+| `GET /coopers-resume` (alias: `GET /resume`) | The same rendered resume `get_resume` returns, as `text/markdown` — no MCP client needed |
 | `GET /healthz` | Liveness check, always `200`, body `Ok` |
 | `GET /metrics` | Prometheus metrics (see [Metrics](#metrics)) |
 
