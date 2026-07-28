@@ -190,6 +190,7 @@ where
         .map_err(|join_err| AppError::Other(format!("conversion task panicked: {join_err}")))?
 }
 
+#[tracing::instrument(level = "debug", skip(state))]
 async fn fetch_list<T>(
     state: &AppState,
     endpoint: &str,
@@ -201,9 +202,13 @@ where
     let url = list_url(&state.wordpress_url, endpoint, req);
     let body = state.fetch_cached(&url).await?;
     let raw: Vec<WpItemRaw> = serde_json::from_str(&body)?;
-    convert_blocking(move || raw.into_iter().map(T::try_from).collect()).await
+    let items: Vec<T> =
+        convert_blocking(move || raw.into_iter().map(T::try_from).collect()).await?;
+    tracing::debug!(count = items.len(), "fetched list");
+    Ok(items)
 }
 
+#[tracing::instrument(level = "debug", skip(state))]
 async fn fetch_one<T>(state: &AppState, endpoint: &str, slug: &str) -> Result<T, AppError>
 where
     T: TryFrom<WpItemRaw, Error = AppError> + Send + 'static,

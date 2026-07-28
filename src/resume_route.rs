@@ -18,6 +18,7 @@ pub async fn coopers_resume(State(state): State<AppState>) -> impl IntoResponse 
             .into_response(),
         Err(err) => {
             state.metrics.record_error(&err);
+            tracing::warn!(error = %err, kind = err.kind(), "coopers_resume failed");
             (StatusCode::BAD_GATEWAY, err.to_string()).into_response()
         }
     }

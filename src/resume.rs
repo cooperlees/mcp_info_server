@@ -35,6 +35,7 @@ fn export_url(base: &str, doc_id: &str) -> String {
 ///
 /// CPU-bound (DOM parse + multiple Markdown conversions) — always call this
 /// through `tokio::task::spawn_blocking` from async code, never inline.
+#[tracing::instrument(level = "debug", skip(raw_html), fields(html_len = raw_html.len()))]
 fn convert_resume_html(raw_html: &str) -> Result<String, AppError> {
     let mut document = Html::parse_document(raw_html);
     strip_decorative_images(&mut document);
@@ -82,6 +83,7 @@ fn convert_via_table(document: &Html) -> Result<Option<Vec<String>>, AppError> {
 /// `ResumeDocument` (including `fetched_at`) is cached again on top of that
 /// for 1 minute, so bursts of calls from an MCP client (tool call + a human
 /// hitting `/coopers-resume` moments later) share one render.
+#[tracing::instrument(level = "debug", skip(state))]
 pub async fn get_resume(state: &AppState) -> Result<ResumeDocument, AppError> {
     let cache = state.resume_cache.clone();
     let metrics = state.metrics.clone();
@@ -104,7 +106,9 @@ pub async fn get_resume(state: &AppState) -> Result<ResumeDocument, AppError> {
         })
         .await
         .map_err(unwrap_cache_error)?;
-    metrics.record_cache("resume", !entry.is_fresh());
+    let hit = !entry.is_fresh();
+    tracing::debug!(hit, "resume cache lookup");
+    metrics.record_cache("resume", hit);
     Ok(entry.into_value())
 }
 

@@ -102,6 +102,7 @@ impl AppState {
     }
 
     /// Fetch `url`'s body as text, serving from cache when available.
+    #[tracing::instrument(level = "debug", skip(self))]
     pub async fn fetch_cached(&self, url: &str) -> Result<Arc<str>, AppError> {
         let http = self.http.clone();
         let url_owned = url.to_owned();
@@ -120,7 +121,9 @@ impl AppState {
             })
             .await
             .map_err(unwrap_cache_error)?;
-        self.metrics.record_cache("http", !entry.is_fresh());
+        let hit = !entry.is_fresh();
+        tracing::debug!(hit, "http cache lookup");
+        self.metrics.record_cache("http", hit);
         Ok(entry.into_value())
     }
 
@@ -128,6 +131,7 @@ impl AppState {
     /// countdown cache when available. Separate from `fetch_cached` because
     /// this upstream content-negotiates on `Accept` (it serves an HTML page
     /// by default) and needs a much shorter TTL to stay meaningfully live.
+    #[tracing::instrument(level = "debug", skip(self))]
     pub async fn fetch_countdown_cached(&self, url: &str) -> Result<Arc<str>, AppError> {
         let http = self.http.clone();
         let url_owned = url.to_owned();
@@ -147,7 +151,9 @@ impl AppState {
             })
             .await
             .map_err(unwrap_cache_error)?;
-        self.metrics.record_cache("countdown", !entry.is_fresh());
+        let hit = !entry.is_fresh();
+        tracing::debug!(hit, "countdown cache lookup");
+        self.metrics.record_cache("countdown", hit);
         Ok(entry.into_value())
     }
 }

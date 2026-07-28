@@ -69,6 +69,7 @@ pub struct CountdownList {
     pub countdowns: Vec<Countdown>,
 }
 
+#[tracing::instrument(level = "debug", skip(state))]
 async fn fetch(state: &AppState) -> Result<CountdownApiResponse, AppError> {
     let body = state.fetch_countdown_cached(&state.countdown_url).await?;
     Ok(serde_json::from_str(&body)?)

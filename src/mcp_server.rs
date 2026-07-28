@@ -5,6 +5,7 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{ServerCapabilities, ServerInfo};
 use rmcp::{Json, ServerHandler, tool, tool_handler, tool_router};
 use serde::Serialize;
+use tracing::Instrument;
 
 use crate::countdown::{self, Countdown, CountdownList};
 use crate::resume::{self, ResumeDocument};
@@ -44,38 +45,53 @@ impl InfoServer {
     /// `mcp_info_server_tool_calls_total{tool, result}` for it, and — on
     /// failure — `mcp_info_server_errors_total` too. Every tool method is
     /// just one call to this, so none of them repeat the instrumentation.
+    /// Also opens a `tool_call` span (visible with `RUST_LOG=debug`) so any
+    /// spans/logs `fut` produces (cache hits, upstream fetches) nest under
+    /// it with the tool name for free.
     async fn instrumented<T, F>(&self, tool: &str, fut: F) -> Result<Json<T>, String>
     where
         F: Future<Output = Result<T, AppError>>,
     {
-        let timer = self
-            .state
-            .metrics
-            .tool_call_duration_seconds
-            .with_label_values(&[tool])
-            .start_timer();
-        let result = fut.await;
-        timer.observe_duration();
+        let span = tracing::debug_span!("tool_call", tool);
+        async move {
+            let timer = self
+                .state
+                .metrics
+                .tool_call_duration_seconds
+                .with_label_values(&[tool])
+                .start_timer();
+            let result = fut.await;
+            timer.observe_duration();
 
-        match result {
-            Ok(value) => {
-                self.state
-                    .metrics
-                    .tool_calls_total
-                    .with_label_values(&[tool, "ok"])
-                    .inc();
-                Ok(Json(value))
-            }
-            Err(err) => {
-                self.state
-                    .metrics
-                    .tool_calls_total
-                    .with_label_values(&[tool, "error"])
-                    .inc();
-                self.state.metrics.record_error(&err);
-                Err(err.to_string())
+            match result {
+                Ok(value) => {
+                    self.state
+                        .metrics
+                        .tool_calls_total
+                        .with_label_values(&[tool, "ok"])
+                        .inc();
+                    Ok(Json(value))
+                }
+                Err(err) => {
+                    self.state
+                        .metrics
+                        .tool_calls_total
+                        .with_label_values(&[tool, "error"])
+                        .inc();
+                    self.state.metrics.record_error(&err);
+                    // NotFound is a normal client outcome (bad slug); anything
+                    // else is an actual upstream/system failure worth a warn.
+                    if matches!(err, AppError::NotFound(_)) {
+                        tracing::debug!(error = %err, "tool call not found");
+                    } else {
+                        tracing::warn!(error = %err, kind = err.kind(), "tool call failed");
+                    }
+                    Err(err.to_string())
+                }
             }
         }
+        .instrument(span)
+        .await
     }
 }
 

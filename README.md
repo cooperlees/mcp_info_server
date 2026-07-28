@@ -175,6 +175,7 @@ default:
 | `COUNTDOWN_URL` | `https://countdown.cooperlees.com` | Base URL for the countdown JSON API |
 | `LISTEN_PORT` | `6969` | |
 | `ALLOWED_HOSTS` | `localhost,127.0.0.1,::1` | Comma-separated `Host` header allowlist — rmcp's Streamable HTTP transport rejects any request whose `Host` isn't in this list (DNS-rebinding protection). **A public deployment must add its own hostname here or every real request gets a 403** — the ansible role sets this to `mcp.cooperlees.com,localhost,127.0.0.1,::1`. |
+| `RUST_LOG` | `info` | Standard `tracing_subscriber::EnvFilter` syntax. Logs are glog-formatted on stderr (`Immdd hh:mm:ss.uuuuuu pid file:line] message`). `info` (the default) is quiet: just startup/shutdown and any request/tool-call warnings. `RUST_LOG=mcp_info_server=debug` additionally logs a span per HTTP request and MCP tool call (with nested spans for cache lookups and upstream fetches) plus a `close` line with `time.busy`/`time.idle` for each — `RUST_LOG=debug` does the same but also pulls in `reqwest`/`hyper`/`rustls` internals, which is a lot noisier. |
 
 None of this is secret — no vault entry needed for deployment.
 

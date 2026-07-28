@@ -1,5 +1,6 @@
 mod countdown;
 mod html_convert;
+mod logging;
 mod mcp_server;
 mod metrics;
 mod resume;
@@ -18,6 +19,7 @@ use axum::routing::get;
 use rmcp::transport::StreamableHttpServerConfig;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::streamable_http_server::tower::StreamableHttpService;
+use tracing::Instrument;
 
 use crate::mcp_server::InfoServer;
 use crate::state::{AppError, AppState};
@@ -73,11 +75,17 @@ impl Config {
 
 #[tokio::main]
 async fn main() -> Result<(), AppError> {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .init();
+    logging::init();
 
     let config = Config::from_env()?;
+    tracing::debug!(
+        wordpress_url = %config.wordpress_url,
+        resume_doc_id = %config.resume_doc_id,
+        countdown_url = %config.countdown_url,
+        listen_port = config.listen_port,
+        allowed_hosts = ?config.allowed_hosts,
+        "config loaded",
+    );
     let state = AppState::new(
         config.wordpress_url.clone(),
         config.resume_doc_id.clone(),
@@ -104,7 +112,9 @@ async fn main() -> Result<(), AppError> {
         ))
         .with_state(state);
 
-    let addr = format!("0.0.0.0:{}", config.listen_port);
+    // `::` dual-stack binds both IPv6 and IPv4 (via IPv4-mapped addresses) on
+    // one socket — Linux's default unless `net.ipv6.bindv6only` is set.
+    let addr = format!("[::]:{}", config.listen_port);
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .map_err(|e| AppError::Other(format!("failed to bind {addr}: {e}")))?;
@@ -136,22 +146,32 @@ async fn track_http_metrics(
         .map(MatchedPath::as_str)
         .unwrap_or("unmatched")
         .to_owned();
+    let span = tracing::debug_span!("http_request", %method, %route);
 
-    let timer = state
-        .metrics
-        .http_request_duration_seconds
-        .with_label_values(&[&route, &method])
-        .start_timer();
-    let response = next.run(req).await;
-    timer.observe_duration();
+    async move {
+        let timer = state
+            .metrics
+            .http_request_duration_seconds
+            .with_label_values(&[&route, &method])
+            .start_timer();
+        let response = next.run(req).await;
+        timer.observe_duration();
 
-    let status = response.status().as_u16().to_string();
-    state
-        .metrics
-        .http_requests_total
-        .with_label_values(&[&route, &method, &status])
-        .inc();
-    response
+        let status = response.status();
+        state
+            .metrics
+            .http_requests_total
+            .with_label_values(&[&route, &method, &status.as_u16().to_string()])
+            .inc();
+        if status.is_server_error() {
+            tracing::warn!(%status, "request failed");
+        } else {
+            tracing::debug!(%status, "request completed");
+        }
+        response
+    }
+    .instrument(span)
+    .await
 }
 
 async fn metrics_handler(
