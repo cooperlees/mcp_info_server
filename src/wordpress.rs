@@ -23,10 +23,10 @@ struct WpItemRaw {
 pub struct ListRequest {
     /// 1-indexed page of results.
     #[serde(default)]
-    pub page: Option<u32>,
+    pub page: Option<i32>,
     /// Results per page (WordPress default/max is 100).
     #[serde(default)]
-    pub per_page: Option<u32>,
+    pub per_page: Option<i32>,
 }
 
 #[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]

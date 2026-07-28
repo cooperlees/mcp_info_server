@@ -210,6 +210,68 @@ mod tests {
         }
     }
 
+    // schemars (see json_schema_impls::primitives in the vendored source)
+    // maps every Rust integer type except i32/i64 to a "format" string
+    // outside any standard vocabulary: uint8/16/32/64/128/uint for
+    // u8/u16/u32/u64/u128/usize, int8/16/128/int for i8/i16/i128/isize. MCP
+    // clients' JSON Schema validators don't recognize them and log "unknown
+    // format ... ignored" noise on every tool call - see the wordpress::id /
+    // ListRequest::page fixes. This is the full, closed set schemars can
+    // ever produce, so tool schema fields must stick to i32/i64 for whole
+    // numbers.
+    const UNRECOGNIZED_INTEGER_FORMATS: &[&str] = &[
+        "uint8", "uint16", "uint32", "uint64", "uint128", "uint", "int8", "int16", "int128", "int",
+    ];
+
+    fn collect_unrecognized_formats(
+        path: String,
+        value: &serde_json::Value,
+        out: &mut Vec<String>,
+    ) {
+        let serde_json::Value::Object(map) = value else {
+            if let serde_json::Value::Array(items) = value {
+                for (i, item) in items.iter().enumerate() {
+                    collect_unrecognized_formats(format!("{path}[{i}]"), item, out);
+                }
+            }
+            return;
+        };
+        if let Some(serde_json::Value::String(format)) = map.get("format")
+            && UNRECOGNIZED_INTEGER_FORMATS.contains(&format.as_str())
+        {
+            out.push(format!("{path}: format={format:?}"));
+        }
+        for (key, child) in map {
+            collect_unrecognized_formats(format!("{path}/{key}"), child, out);
+        }
+    }
+
+    #[test]
+    fn tool_schemas_avoid_integer_types_schemars_cant_format_for_clients() {
+        let server = test_server();
+        let mut unrecognized = Vec::new();
+        for tool in server.tool_router.list_all() {
+            collect_unrecognized_formats(
+                format!("{}#input_schema", tool.name),
+                &serde_json::Value::Object((*tool.input_schema).clone()),
+                &mut unrecognized,
+            );
+            if let Some(output_schema) = &tool.output_schema {
+                collect_unrecognized_formats(
+                    format!("{}#output_schema", tool.name),
+                    &serde_json::Value::Object((**output_schema).clone()),
+                    &mut unrecognized,
+                );
+            }
+        }
+        assert!(
+            unrecognized.is_empty(),
+            "tool schemas use a Rust integer type schemars can't format for MCP clients \
+             (likely a u8/u16/u32/u64/u128/usize or i8/i16/i128/isize field - use i32/i64 \
+             instead): {unrecognized:#?}"
+        );
+    }
+
     #[tokio::test]
     async fn instrumented_records_ok_result_and_duration() {
         let server = test_server();
