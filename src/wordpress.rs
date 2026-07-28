@@ -36,7 +36,7 @@ pub struct SlugRequest {
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct PostSummary {
-    pub id: u64,
+    pub id: i64,
     pub slug: String,
     pub title: String,
     pub excerpt_markdown: String,
@@ -46,7 +46,7 @@ pub struct PostSummary {
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct PostDetail {
-    pub id: u64,
+    pub id: i64,
     pub slug: String,
     pub title: String,
     pub content_markdown: String,
@@ -56,7 +56,7 @@ pub struct PostDetail {
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct PageSummary {
-    pub id: u64,
+    pub id: i64,
     pub slug: String,
     pub title: String,
     pub excerpt_markdown: String,
@@ -66,7 +66,7 @@ pub struct PageSummary {
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct PageDetail {
-    pub id: u64,
+    pub id: i64,
     pub slug: String,
     pub title: String,
     pub content_markdown: String,
@@ -76,10 +76,10 @@ pub struct PageDetail {
 
 fn summary_from_raw(
     raw: WpItemRaw,
-) -> Result<(u64, String, String, String, String, String), AppError> {
+) -> Result<(i64, String, String, String, String, String), AppError> {
     let excerpt_markdown = html_to_markdown(&raw.excerpt.rendered)?;
     Ok((
-        raw.id,
+        raw.id as i64,
         raw.slug,
         raw.title.rendered,
         excerpt_markdown,
@@ -123,7 +123,7 @@ impl TryFrom<WpItemRaw> for PostDetail {
     fn try_from(raw: WpItemRaw) -> Result<Self, AppError> {
         let content_markdown = html_to_markdown(&raw.content.rendered)?;
         Ok(Self {
-            id: raw.id,
+            id: raw.id as i64,
             slug: raw.slug,
             title: raw.title.rendered,
             content_markdown,
@@ -138,7 +138,7 @@ impl TryFrom<WpItemRaw> for PageDetail {
     fn try_from(raw: WpItemRaw) -> Result<Self, AppError> {
         let content_markdown = html_to_markdown(&raw.content.rendered)?;
         Ok(Self {
-            id: raw.id,
+            id: raw.id as i64,
             slug: raw.slug,
             title: raw.title.rendered,
             content_markdown,
