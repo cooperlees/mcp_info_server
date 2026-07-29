@@ -8,7 +8,7 @@ mod resume_route;
 mod state;
 mod wordpress;
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
 use axum::Router;
@@ -149,16 +149,44 @@ fn client_ip(req: &Request<axum::body::Body>, peer_addr: SocketAddr) -> String {
         .unwrap_or_else(|| peer_addr.ip().to_string())
 }
 
+/// Coarsens a client address to /24 (v4) or /64 (v6) — the bounded grouping
+/// used as an actual Prometheus label, since the raw address is unbounded on
+/// a public endpoint. Also the semantically right grouping for IPv6: RFC
+/// 4941 privacy addresses mean the same client can present a different host
+/// part within its /64 on every connection. IPv4-mapped IPv6 addresses (the
+/// form the TCP peer fallback takes on a dual-stack `[::]` listener) are
+/// normalized back to plain v4 first so they group by /24 too.
+fn client_subnet(ip: &str) -> String {
+    match ip.parse::<IpAddr>() {
+        Ok(IpAddr::V4(v4)) => ipv4_slash24(v4),
+        Ok(IpAddr::V6(v6)) => match v6.to_ipv4_mapped() {
+            Some(v4) => ipv4_slash24(v4),
+            None => {
+                let s = v6.segments();
+                format!("{:x}:{:x}:{:x}:{:x}::/64", s[0], s[1], s[2], s[3])
+            }
+        },
+        Err(_) => "unknown".to_owned(),
+    }
+}
+
+fn ipv4_slash24(v4: Ipv4Addr) -> String {
+    let o = v4.octets();
+    format!("{}.{}.{}.0/24", o[0], o[1], o[2])
+}
+
 /// Records `mcp_info_server_http_requests_total` and
 /// `_http_request_duration_seconds` for every request, labeled by the
 /// matched route template (never the raw path — `/mcp` carries every MCP
 /// tool call, so per-tool breakdowns come from `mcp_server.rs`'s own
 /// instrumentation instead of by route here).
 ///
-/// Client address deliberately isn't a metric label (unbounded cardinality
-/// on a public, unauthenticated endpoint) — instead every request logs one
-/// `info`-level access-log line with `client_ip`, which Loki picks up for
-/// per-client breakdowns in Grafana.
+/// The raw client address deliberately isn't a metric label (unbounded
+/// cardinality on a public, unauthenticated endpoint) — every request logs
+/// one `info`-level access-log line with the exact `client_ip`, which Loki
+/// picks up for per-client breakdowns in Grafana, while a bounded
+/// `client_subnet` (see `client_subnet()`) does become a real Prometheus
+/// label on `mcp_info_server_client_subnet_requests_total`.
 async fn track_http_metrics(
     State(state): State<AppState>,
     matched_path: Option<MatchedPath>,
@@ -191,6 +219,11 @@ async fn track_http_metrics(
             .metrics
             .http_requests_total
             .with_label_values(&[&route, &method, &status.as_u16().to_string()])
+            .inc();
+        state
+            .metrics
+            .client_subnet_requests_total
+            .with_label_values(&[&client_subnet(&client_ip)])
             .inc();
         tracing::info!(
             %client_ip,
@@ -290,4 +323,32 @@ async fn shutdown_signal() {
         _ = terminate => {}
     }
     tracing::info!("shutdown signal received");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn client_subnet_masks_ipv4_to_slash24() {
+        assert_eq!(client_subnet("203.0.113.42"), "203.0.113.0/24");
+    }
+
+    #[test]
+    fn client_subnet_masks_ipv6_to_slash64() {
+        assert_eq!(
+            client_subnet("2600:1702:7310:20e0::69"),
+            "2600:1702:7310:20e0::/64"
+        );
+    }
+
+    #[test]
+    fn client_subnet_normalizes_ipv4_mapped_ipv6_to_slash24() {
+        assert_eq!(client_subnet("::ffff:10.251.254.20"), "10.251.254.0/24");
+    }
+
+    #[test]
+    fn client_subnet_falls_back_to_unknown_for_garbage() {
+        assert_eq!(client_subnet("not-an-ip"), "unknown");
+    }
 }

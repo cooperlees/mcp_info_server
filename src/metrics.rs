@@ -15,6 +15,7 @@ pub struct Metrics {
     registry: Registry,
     pub http_requests_total: IntCounterVec,
     pub http_request_duration_seconds: HistogramVec,
+    pub client_subnet_requests_total: IntCounterVec,
     pub tool_calls_total: IntCounterVec,
     pub tool_call_duration_seconds: HistogramVec,
     cache_requests_total: IntCounterVec,
@@ -50,6 +51,19 @@ impl Metrics {
         )
         .expect("valid metric definition");
         register(&registry, &http_request_duration_seconds);
+
+        // client_ip itself is never a label — unbounded on a public,
+        // unauthenticated endpoint. The containing /24 (v4) or /64 (v6) is a
+        // bounded, meaningful grouping instead (see main.rs::client_subnet).
+        let client_subnet_requests_total = IntCounterVec::new(
+            Opts::new(
+                "mcp_info_server_client_subnet_requests_total",
+                "Total HTTP requests by client subnet (/24 for IPv4, /64 for IPv6)",
+            ),
+            &["subnet"],
+        )
+        .expect("valid metric definition");
+        register(&registry, &client_subnet_requests_total);
 
         let tool_calls_total = IntCounterVec::new(
             Opts::new(
@@ -95,6 +109,7 @@ impl Metrics {
             registry,
             http_requests_total,
             http_request_duration_seconds,
+            client_subnet_requests_total,
             tool_calls_total,
             tool_call_duration_seconds,
             cache_requests_total,
@@ -142,12 +157,19 @@ mod tests {
             .http_requests_total
             .with_label_values(&["/healthz", "GET", "200"])
             .inc();
+        metrics
+            .client_subnet_requests_total
+            .with_label_values(&["203.0.113.0/24"])
+            .inc();
         metrics.record_cache("http", true);
         metrics.record_cache("http", false);
         metrics.record_error(&AppError::NotFound("nope".to_owned()));
 
         let body = metrics.render().unwrap();
         assert!(body.contains("mcp_info_server_http_requests_total"));
+        assert!(body.contains(
+            r#"mcp_info_server_client_subnet_requests_total{subnet="203.0.113.0/24"} 1"#
+        ));
         assert!(body.contains("mcp_info_server_cache_requests_total"));
         assert!(body.contains("mcp_info_server_errors_total"));
         assert!(body.contains(r#"kind="not_found""#));

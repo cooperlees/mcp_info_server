@@ -226,6 +226,7 @@ markup, not a hand-simplified stand-in.
 |---|---|---|---|
 | `http_requests_total` | counter | `route`, `method`, `status` | Requests per HTTP route (`/`, `/mcp`, `/coopers-resume`, `/healthz`, `/metrics`) |
 | `http_request_duration_seconds` | histogram | `route`, `method` | Latency per HTTP route |
+| `client_subnet_requests_total` | counter | `subnet` | Requests by client subnet (`/24` for IPv4, `/64` for IPv6 — the raw `client_ip` is never a label, only in the `http_request` log line, to keep this bounded on a public endpoint) |
 | `tool_calls_total` | counter | `tool`, `result` (`ok`/`error`) | Calls per MCP tool — since all 7 tools share the one `/mcp` route, this is where the per-tool breakdown actually lives |
 | `tool_call_duration_seconds` | histogram | `tool` | Latency per MCP tool |
 | `cache_requests_total` | counter | `cache` (`http`/`resume`/`countdown`), `result` (`hit`/`miss`) | Hit/miss rate for all three cache layers (see [How it works](#how-it-works)) |
