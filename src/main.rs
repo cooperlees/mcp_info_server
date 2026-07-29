@@ -8,10 +8,11 @@ mod resume_route;
 mod state;
 mod wordpress;
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::Router;
-use axum::extract::{MatchedPath, State};
+use axum::extract::{ConnectInfo, MatchedPath, State};
 use axum::http::{HeaderMap, Request, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::Response;
@@ -121,12 +122,31 @@ async fn main() -> Result<(), AppError> {
 
     tracing::info!(%addr, "mcp_info_server listening");
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .map_err(|e| AppError::Other(format!("server error: {e}")))?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await
+    .map_err(|e| AppError::Other(format!("server error: {e}")))?;
 
     Ok(())
+}
+
+/// Traefik sits in front of every real request and sets `X-Forwarded-For`
+/// (leftmost entry is the original client) — trust it over the TCP peer
+/// address, which is always Traefik's own container IP. Falls back to the
+/// peer address for anything that reaches the server directly (local dev,
+/// healthchecks).
+fn client_ip(req: &Request<axum::body::Body>, peer_addr: SocketAddr) -> String {
+    req.headers()
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| peer_addr.ip().to_string())
 }
 
 /// Records `mcp_info_server_http_requests_total` and
@@ -134,9 +154,15 @@ async fn main() -> Result<(), AppError> {
 /// matched route template (never the raw path — `/mcp` carries every MCP
 /// tool call, so per-tool breakdowns come from `mcp_server.rs`'s own
 /// instrumentation instead of by route here).
+///
+/// Client address deliberately isn't a metric label (unbounded cardinality
+/// on a public, unauthenticated endpoint) — instead every request logs one
+/// `info`-level access-log line with `client_ip`, which Loki picks up for
+/// per-client breakdowns in Grafana.
 async fn track_http_metrics(
     State(state): State<AppState>,
     matched_path: Option<MatchedPath>,
+    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
     req: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
@@ -146,9 +172,11 @@ async fn track_http_metrics(
         .map(MatchedPath::as_str)
         .unwrap_or("unmatched")
         .to_owned();
-    let span = tracing::debug_span!("http_request", %method, %route);
+    let client_ip = client_ip(&req, peer_addr);
+    let span = tracing::debug_span!("http_request", %method, %route, %client_ip);
 
     async move {
+        let start = std::time::Instant::now();
         let timer = state
             .metrics
             .http_request_duration_seconds
@@ -156,6 +184,7 @@ async fn track_http_metrics(
             .start_timer();
         let response = next.run(req).await;
         timer.observe_duration();
+        let duration_ms = start.elapsed().as_secs_f64() * 1000.0;
 
         let status = response.status();
         state
@@ -163,6 +192,14 @@ async fn track_http_metrics(
             .http_requests_total
             .with_label_values(&[&route, &method, &status.as_u16().to_string()])
             .inc();
+        tracing::info!(
+            %client_ip,
+            %method,
+            %route,
+            status = status.as_u16(),
+            duration_ms,
+            "http_request"
+        );
         if status.is_server_error() {
             tracing::warn!(%status, "request failed");
         } else {
