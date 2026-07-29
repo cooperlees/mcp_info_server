@@ -162,23 +162,31 @@ fn client_ip(req: &Request<axum::body::Body>, peer_addr: SocketAddr) -> String {
         .unwrap_or_else(|| peer_addr.ip().to_string())
 }
 
+/// A dual-stack `[::]` listener hands IPv4 peers to us as IPv4-mapped IPv6
+/// addresses (`::ffff:a.b.c.d`) — `IpAddr::from_str` parses that as `V6`,
+/// not `V4`, so anything downstream that branches on the variant (subnet
+/// masking, `asn::is_publicly_routable`, the Cymru query builder) needs this
+/// run first or it'll treat a plain private v4 peer as some exotic public
+/// v6 address.
+fn normalize_ip(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(ip, IpAddr::V4),
+        v4 => v4,
+    }
+}
+
 /// Coarsens a client address to /24 (v4) or /64 (v6) — the bounded grouping
 /// used as an actual Prometheus label, since the raw address is unbounded on
 /// a public endpoint. Also the semantically right grouping for IPv6: RFC
 /// 4941 privacy addresses mean the same client can present a different host
-/// part within its /64 on every connection. IPv4-mapped IPv6 addresses (the
-/// form the TCP peer fallback takes on a dual-stack `[::]` listener) are
-/// normalized back to plain v4 first so they group by /24 too.
+/// part within its /64 on every connection.
 fn client_subnet(ip: &str) -> String {
-    match ip.parse::<IpAddr>() {
+    match ip.parse::<IpAddr>().map(normalize_ip) {
         Ok(IpAddr::V4(v4)) => ipv4_slash24(v4),
-        Ok(IpAddr::V6(v6)) => match v6.to_ipv4_mapped() {
-            Some(v4) => ipv4_slash24(v4),
-            None => {
-                let s = v6.segments();
-                format!("{:x}:{:x}:{:x}:{:x}::/64", s[0], s[1], s[2], s[3])
-            }
-        },
+        Ok(IpAddr::V6(v6)) => {
+            let s = v6.segments();
+            format!("{:x}:{:x}:{:x}:{:x}::/64", s[0], s[1], s[2], s[3])
+        }
         Err(_) => "unknown".to_owned(),
     }
 }
@@ -246,7 +254,7 @@ async fn track_http_metrics(
         // never worth holding the response up for, so it runs after we've
         // already got `response` in hand, in a detached task. Cheap on a
         // cache hit (the overwhelmingly common case) either way.
-        if let Ok(ip) = client_ip.parse() {
+        if let Ok(ip) = client_ip.parse::<IpAddr>().map(normalize_ip) {
             let state = state.clone();
             tokio::spawn(async move {
                 let info = state.lookup_asn_cached(&subnet, ip).await;
@@ -386,5 +394,37 @@ mod tests {
     #[test]
     fn client_subnet_falls_back_to_unknown_for_garbage() {
         assert_eq!(client_subnet("not-an-ip"), "unknown");
+    }
+
+    #[test]
+    fn normalize_ip_unwraps_ipv4_mapped_ipv6() {
+        assert_eq!(
+            normalize_ip("::ffff:10.251.254.20".parse().unwrap()),
+            "10.251.254.20".parse::<IpAddr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn normalize_ip_leaves_plain_addresses_untouched() {
+        assert_eq!(
+            normalize_ip("2600:1702:7310:20e0::69".parse().unwrap()),
+            "2600:1702:7310:20e0::69".parse::<IpAddr>().unwrap()
+        );
+        assert_eq!(
+            normalize_ip("203.0.113.42".parse().unwrap()),
+            "203.0.113.42".parse::<IpAddr>().unwrap()
+        );
+    }
+
+    /// Regression test: a private IPv4 peer on a dual-stack `[::]` listener
+    /// (e.g. Prometheus scraping /metrics directly, no X-Forwarded-For)
+    /// arrives as `::ffff:10.x.x.x`. Without normalizing first,
+    /// `is_publicly_routable` sees a `V6` that isn't loopback/ULA/link-local
+    /// and wrongly calls it public - this asserts the two functions compose
+    /// correctly, the way `track_http_metrics` actually calls them.
+    #[test]
+    fn normalized_ipv4_mapped_private_address_is_not_publicly_routable() {
+        let ip: IpAddr = "::ffff:10.251.254.20".parse().unwrap();
+        assert!(!crate::asn::is_publicly_routable(normalize_ip(ip)));
     }
 }
