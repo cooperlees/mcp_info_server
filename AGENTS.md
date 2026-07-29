@@ -27,6 +27,14 @@ cargo run                                               # Run locally on :6969
 docker build -t mcp_info_server:latest .
 docker run --rm -p 6969:6969 mcp_info_server:latest
 npx @modelcontextprotocol/inspector http://localhost:6969/mcp   # Interactive MCP debugger
+
+# Release regression gate — wire-level MCP protocol/security checks `cargo test`'s unit
+# tests can't catch (they exercise Rust internals, not the actual JSON-RPC/HTTP contract
+# a client sees). Runs as part of `cargo test` already; call out explicitly before/after
+# a release:
+cargo test --test protocol_smoke                        # Pre-release: spawns the just-built binary
+MCP_SMOKE_TEST_URL=https://mcp.cooperlees.com \
+  cargo test --test protocol_smoke                      # Post-release: checks the live deployment instead
 ```
 
 All four CI checks (fmt, clippy, test, release build) must pass locally before pushing — this
