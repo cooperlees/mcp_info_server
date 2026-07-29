@@ -1,3 +1,4 @@
+mod asn;
 mod countdown;
 mod html_convert;
 mod logging;
@@ -28,6 +29,12 @@ use crate::state::{AppError, AppState};
 const DEFAULT_WORDPRESS_URL: &str = "https://cooperlees.com";
 const DEFAULT_RESUME_DOC_ID: &str = "1ksWGBa1ZrGVItQybR-tVnism2E-LIGsmcdf-CDalFcw";
 const DEFAULT_COUNTDOWN_URL: &str = "https://countdown.cooperlees.com";
+/// The Prometheus this server's own metrics get scraped by — same Docker
+/// network in the real deployment, resolved by container name, so this
+/// default just works there. Used to skip a Cymru DNS round trip when a
+/// client subnet's ASN is already sitting in Prometheus from a prior
+/// process lifetime (see `asn::lookup_from_prometheus`).
+const DEFAULT_PROMETHEUS_URL: &str = "http://prometheus:9090";
 const DEFAULT_LISTEN_PORT: u16 = 6969;
 /// rmcp's Streamable HTTP transport rejects requests whose `Host` header
 /// isn't in this list (DNS-rebinding protection) — it defaults to loopback
@@ -39,6 +46,7 @@ struct Config {
     wordpress_url: String,
     resume_doc_id: String,
     countdown_url: String,
+    prometheus_url: String,
     listen_port: u16,
     allowed_hosts: Vec<String>,
 }
@@ -51,6 +59,8 @@ impl Config {
             std::env::var("RESUME_DOC_ID").unwrap_or_else(|_| DEFAULT_RESUME_DOC_ID.to_owned());
         let countdown_url =
             std::env::var("COUNTDOWN_URL").unwrap_or_else(|_| DEFAULT_COUNTDOWN_URL.to_owned());
+        let prometheus_url =
+            std::env::var("PROMETHEUS_URL").unwrap_or_else(|_| DEFAULT_PROMETHEUS_URL.to_owned());
         let listen_port = match std::env::var("LISTEN_PORT") {
             Ok(raw) => raw.parse::<u16>().map_err(|e| {
                 AppError::Other(format!("LISTEN_PORT {raw:?} is not a valid port: {e}"))
@@ -68,6 +78,7 @@ impl Config {
             wordpress_url,
             resume_doc_id,
             countdown_url,
+            prometheus_url,
             listen_port,
             allowed_hosts,
         })
@@ -83,6 +94,7 @@ async fn main() -> Result<(), AppError> {
         wordpress_url = %config.wordpress_url,
         resume_doc_id = %config.resume_doc_id,
         countdown_url = %config.countdown_url,
+        prometheus_url = %config.prometheus_url,
         listen_port = config.listen_port,
         allowed_hosts = ?config.allowed_hosts,
         "config loaded",
@@ -91,6 +103,7 @@ async fn main() -> Result<(), AppError> {
         config.wordpress_url.clone(),
         config.resume_doc_id.clone(),
         config.countdown_url.clone(),
+        config.prometheus_url.clone(),
     )?;
 
     let mcp_state = state.clone();
@@ -186,7 +199,10 @@ fn ipv4_slash24(v4: Ipv4Addr) -> String {
 /// one `info`-level access-log line with the exact `client_ip`, which Loki
 /// picks up for per-client breakdowns in Grafana, while a bounded
 /// `client_subnet` (see `client_subnet()`) does become a real Prometheus
-/// label on `mcp_info_server_client_subnet_requests_total`.
+/// label on `mcp_info_server_client_subnet_requests_total`. A detached task
+/// additionally resolves that subnet's ASN (`asn` module) and records it on
+/// `mcp_info_server_client_asn_requests_total` once resolution completes —
+/// never on the request path itself, and "unknown"/"unknown" until it is.
 async fn track_http_metrics(
     State(state): State<AppState>,
     matched_path: Option<MatchedPath>,
@@ -220,11 +236,31 @@ async fn track_http_metrics(
             .http_requests_total
             .with_label_values(&[&route, &method, &status.as_u16().to_string()])
             .inc();
+        let subnet = client_subnet(&client_ip);
         state
             .metrics
             .client_subnet_requests_total
-            .with_label_values(&[&client_subnet(&client_ip)])
+            .with_label_values(&[&subnet])
             .inc();
+        // ASN resolution can mean two sequential DNS round trips (Cymru) -
+        // never worth holding the response up for, so it runs after we've
+        // already got `response` in hand, in a detached task. Cheap on a
+        // cache hit (the overwhelmingly common case) either way.
+        if let Ok(ip) = client_ip.parse() {
+            let state = state.clone();
+            tokio::spawn(async move {
+                let info = state.lookup_asn_cached(&subnet, ip).await;
+                let (asn, org) = info
+                    .as_deref()
+                    .map(|i| (i.asn_label(), i.org.clone()))
+                    .unwrap_or_else(|| (asn::UNKNOWN.to_owned(), asn::UNKNOWN.to_owned()));
+                state
+                    .metrics
+                    .client_asn_requests_total
+                    .with_label_values(&[&subnet, &asn, &org])
+                    .inc();
+            });
+        }
         tracing::info!(
             %client_ip,
             %method,

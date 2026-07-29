@@ -1,8 +1,11 @@
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use hickory_resolver::TokioResolver;
 use moka::future::Cache;
 
+use crate::asn::{self, AsnInfo};
 use crate::metrics::Metrics;
 use crate::resume::ResumeDocument;
 
@@ -45,6 +48,10 @@ pub(crate) fn unwrap_cache_error(err: Arc<AppError>) -> AppError {
 
 const HTTP_CACHE_TTL: Duration = Duration::from_secs(45 * 60);
 const RESUME_CACHE_TTL: Duration = Duration::from_secs(60);
+/// ASN assignment for a given subnet essentially never changes day to day;
+/// this mostly bounds how quickly a genuine reassignment (or a previously
+/// failed lookup) gets retried, not how "fresh" the data needs to be.
+const ASN_CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 /// Countdown data changes every second by design (`seconds_remaining`), so it
 /// gets a much shorter cache than the WordPress/resume content — long enough
 /// to absorb a burst of calls, short enough that "how long until X" stays
@@ -61,11 +68,14 @@ pub struct AppState {
     pub wordpress_url: String,
     pub resume_doc_id: String,
     pub countdown_url: String,
+    pub prometheus_url: String,
     pub metrics: Metrics,
     resume_base_url: String,
     http_cache: Cache<String, Arc<str>>,
     pub(crate) resume_cache: Cache<(), ResumeDocument>,
     countdown_cache: Cache<String, Arc<str>>,
+    asn_resolver: TokioResolver,
+    asn_cache: Cache<String, Option<Arc<AsnInfo>>>,
 }
 
 impl AppState {
@@ -73,20 +83,27 @@ impl AppState {
         wordpress_url: String,
         resume_doc_id: String,
         countdown_url: String,
+        prometheus_url: String,
     ) -> Result<Self, AppError> {
         let http = reqwest::Client::builder()
             .user_agent(concat!("mcp_info_server/", env!("CARGO_PKG_VERSION")))
             .build()?;
+        let asn_resolver = TokioResolver::builder_tokio()
+            .and_then(|builder| builder.build())
+            .map_err(|e| AppError::Other(format!("failed to initialize DNS resolver: {e}")))?;
         Ok(Self {
             http,
             wordpress_url,
             resume_doc_id,
             countdown_url,
+            prometheus_url,
             metrics: Metrics::new(),
             resume_base_url: "https://docs.google.com".to_owned(),
             http_cache: Cache::builder().time_to_live(HTTP_CACHE_TTL).build(),
             resume_cache: Cache::builder().time_to_live(RESUME_CACHE_TTL).build(),
             countdown_cache: Cache::builder().time_to_live(COUNTDOWN_CACHE_TTL).build(),
+            asn_resolver,
+            asn_cache: Cache::builder().time_to_live(ASN_CACHE_TTL).build(),
         })
     }
 
@@ -156,6 +173,66 @@ impl AppState {
         self.metrics.record_cache("countdown", hit);
         Ok(entry.into_value())
     }
+
+    /// Resolves `ip`'s ASN + org name, cached by `subnet` (the /24 or /64
+    /// containing it — ASN assignment is effectively constant within one).
+    /// Never held up for and never surfaces an error to the caller: a
+    /// private/loopback address, or any failure of the lookup itself, both
+    /// just cache `None` for `ASN_CACHE_TTL` — the detailed failure reason,
+    /// when there is one, is logged right here, once per subnet per TTL
+    /// window, rather than left for the caller to log per-request.
+    pub async fn lookup_asn_cached(&self, subnet: &str, ip: IpAddr) -> Option<Arc<AsnInfo>> {
+        let resolver = self.asn_resolver.clone();
+        let http = self.http.clone();
+        let prometheus_url = self.prometheus_url.clone();
+        let subnet_owned = subnet.to_owned();
+        let entry = self
+            .asn_cache
+            .entry(subnet.to_owned())
+            .or_insert_with(async move {
+                if !asn::is_publicly_routable(ip) {
+                    tracing::debug!(%ip, subnet = %subnet_owned, "skipping asn lookup for non-public address");
+                    return None;
+                }
+                if let Some(info) =
+                    asn::lookup_from_prometheus(&http, &prometheus_url, &subnet_owned).await
+                {
+                    tracing::debug!(
+                        subnet = %subnet_owned,
+                        asn = info.asn,
+                        org = %info.org,
+                        "asn resolved from local prometheus, skipped cymru"
+                    );
+                    return Some(Arc::new(info));
+                }
+                match asn::lookup(&resolver, ip).await {
+                    Ok(info) => {
+                        tracing::debug!(
+                            %ip,
+                            subnet = %subnet_owned,
+                            asn = info.asn,
+                            org = %info.org,
+                            "asn resolved via cymru dns"
+                        );
+                        Some(Arc::new(info))
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            %ip,
+                            subnet = %subnet_owned,
+                            %error,
+                            "asn lookup failed, caching unknown for {}h",
+                            ASN_CACHE_TTL.as_secs() / 3600
+                        );
+                        None
+                    }
+                }
+            })
+            .await;
+        let hit = !entry.is_fresh();
+        self.metrics.record_cache("asn", hit);
+        entry.into_value()
+    }
 }
 
 #[cfg(test)]
@@ -173,7 +250,13 @@ mod tests {
             .create_async()
             .await;
 
-        let state = AppState::new(server.url(), "unused".to_owned(), "unused".to_owned()).unwrap();
+        let state = AppState::new(
+            server.url(),
+            "unused".to_owned(),
+            "unused".to_owned(),
+            "unused".to_owned(),
+        )
+        .unwrap();
         let url = format!("{}/thing", server.url());
 
         let first = state.fetch_cached(&url).await.unwrap();
@@ -193,7 +276,13 @@ mod tests {
             .create_async()
             .await;
 
-        let state = AppState::new(server.url(), "unused".to_owned(), "unused".to_owned()).unwrap();
+        let state = AppState::new(
+            server.url(),
+            "unused".to_owned(),
+            "unused".to_owned(),
+            "unused".to_owned(),
+        )
+        .unwrap();
         let url = format!("{}/missing", server.url());
 
         let err = state.fetch_cached(&url).await.unwrap_err();
@@ -212,7 +301,13 @@ mod tests {
             .create_async()
             .await;
 
-        let state = AppState::new("unused".to_owned(), "unused".to_owned(), server.url()).unwrap();
+        let state = AppState::new(
+            "unused".to_owned(),
+            "unused".to_owned(),
+            server.url(),
+            "unused".to_owned(),
+        )
+        .unwrap();
         let url = format!("{}/", server.url());
 
         let first = state.fetch_countdown_cached(&url).await.unwrap();

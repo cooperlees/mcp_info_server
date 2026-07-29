@@ -121,6 +121,12 @@ have?"*, and the client will invoke `get_resume` / `list_posts` on its own.
 - HTML parsing and Markdown conversion (CPU-bound) run via
   `tokio::task::spawn_blocking` so they never stall the async runtime under
   load.
+- **Client ASN enrichment**: a detached task per request resolves the
+  client's subnet to its announcing ASN + org name (24h cache, keyed by
+  subnet) — checking this server's own Prometheus first (same box, and
+  survives this process not having seen the subnet before, since the
+  in-process cache doesn't survive a restart), falling back to Team Cymru's
+  DNS-based ASN lookup. Never on the request path itself. See `src/asn.rs`.
 
 ## Deployment
 
@@ -173,6 +179,7 @@ default:
 | `WORDPRESS_URL` | `https://cooperlees.com` | Base URL for the WP REST API |
 | `RESUME_DOC_ID` | Cooper's resume doc ID | The Google Doc ID (the `.../d/<ID>/edit` part) |
 | `COUNTDOWN_URL` | `https://countdown.cooperlees.com` | Base URL for the countdown JSON API |
+| `PROMETHEUS_URL` | `http://prometheus:9090` | Where this server's own metrics get scraped from — queried (read-only) to skip a Cymru DNS round trip when a client subnet's ASN is already known from a prior process lifetime, since the in-process ASN cache doesn't survive a restart. See [Metrics](#metrics). |
 | `LISTEN_PORT` | `6969` | |
 | `ALLOWED_HOSTS` | `localhost,127.0.0.1,::1` | Comma-separated `Host` header allowlist — rmcp's Streamable HTTP transport rejects any request whose `Host` isn't in this list (DNS-rebinding protection). **A public deployment must add its own hostname here or every real request gets a 403** — the ansible role sets this to `mcp.cooperlees.com,localhost,127.0.0.1,::1`. |
 | `RUST_LOG` | `info` | Standard `tracing_subscriber::EnvFilter` syntax. Logs are glog-formatted on stderr (`Immdd hh:mm:ss.uuuuuu pid file:line] message`). `info` (the default) logs startup/shutdown, any request/tool-call warnings, and one access-log line (`http_request`) per HTTP request with `client_ip`, `method`, `route`, `status`, `duration_ms` — `client_ip` is read from `X-Forwarded-For` (Traefik sets it; falls back to the raw TCP peer otherwise), never a Prometheus label, to keep metric cardinality bounded on a public endpoint. `RUST_LOG=mcp_info_server=debug` additionally logs a span per HTTP request and MCP tool call (with nested spans for cache lookups and upstream fetches) plus a `close` line with `time.busy`/`time.idle` for each — `RUST_LOG=debug` does the same but also pulls in `reqwest`/`hyper`/`rustls` internals, which is a lot noisier. |
@@ -227,9 +234,10 @@ markup, not a hand-simplified stand-in.
 | `http_requests_total` | counter | `route`, `method`, `status` | Requests per HTTP route (`/`, `/mcp`, `/coopers-resume`, `/healthz`, `/metrics`) |
 | `http_request_duration_seconds` | histogram | `route`, `method` | Latency per HTTP route |
 | `client_subnet_requests_total` | counter | `subnet` | Requests by client subnet (`/24` for IPv4, `/64` for IPv6 — the raw `client_ip` is never a label, only in the `http_request` log line, to keep this bounded on a public endpoint) |
+| `client_asn_requests_total` | counter | `subnet`, `asn`, `asn_org` | Requests by client subnet enriched with its announcing ASN + org name (`"unknown"`/`"unknown"` until resolved, or permanently for non-public/unresolvable subnets). Resolved off the request path by a detached task — see `src/asn.rs` — via a same-box Prometheus check first, falling back to [Team Cymru's DNS-based ASN lookup](https://team-cymru.com/community-services/ip-asn-mapping/) |
 | `tool_calls_total` | counter | `tool`, `result` (`ok`/`error`) | Calls per MCP tool — since all 7 tools share the one `/mcp` route, this is where the per-tool breakdown actually lives |
 | `tool_call_duration_seconds` | histogram | `tool` | Latency per MCP tool |
-| `cache_requests_total` | counter | `cache` (`http`/`resume`/`countdown`), `result` (`hit`/`miss`) | Hit/miss rate for all three cache layers (see [How it works](#how-it-works)) |
+| `cache_requests_total` | counter | `cache` (`http`/`resume`/`countdown`/`asn`), `result` (`hit`/`miss`) | Hit/miss rate for all cache layers (see [How it works](#how-it-works)) |
 | `errors_total` | counter | `kind` (`request`/`json`/`html_convert`/`not_found`/`other`) | Every `AppError`, regardless of whether it surfaced as an HTTP 502 or an MCP tool error |
 
 These are deliberately raw counters/histograms, not pre-aggregated 1-minute/5-minute/1-hour
@@ -253,6 +261,8 @@ src/html_convert.rs     shared HTML cleanup (strip hidden/decorative elements,
                         unwrap Google redirect links) + htmd Markdown conversion
 src/resume_route.rs     plain GET /coopers-resume handler, reuses resume.rs
 src/countdown.rs        countdown.cooperlees.com JSON API client + typed structs
+src/asn.rs              client subnet -> ASN + org name (Prometheus check,
+                        then Cymru DNS fallback), off the request path
 ```
 
 Built with [`rmcp`](https://github.com/modelcontextprotocol/rust-sdk) (the

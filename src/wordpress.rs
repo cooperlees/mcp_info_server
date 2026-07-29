@@ -316,7 +316,13 @@ mod tests {
             .with_body("[]")
             .create_async()
             .await;
-        let state = AppState::new(server.url(), "unused".to_owned(), "unused".to_owned()).unwrap();
+        let state = AppState::new(
+            server.url(),
+            "unused".to_owned(),
+            "unused".to_owned(),
+            "unused".to_owned(),
+        )
+        .unwrap();
 
         let err = get_post(&state, "missing").await.unwrap_err();
         assert!(matches!(err, AppError::NotFound(_)));
@@ -333,7 +339,13 @@ mod tests {
             .with_body(body)
             .create_async()
             .await;
-        let state = AppState::new(server.url(), "unused".to_owned(), "unused".to_owned()).unwrap();
+        let state = AppState::new(
+            server.url(),
+            "unused".to_owned(),
+            "unused".to_owned(),
+            "unused".to_owned(),
+        )
+        .unwrap();
 
         let post = get_post(&state, "found-me").await.unwrap();
         assert_eq!(post.id, 42);
@@ -358,7 +370,13 @@ mod tests {
             .with_body(body)
             .create_async()
             .await;
-        let state = AppState::new(server.url(), "unused".to_owned(), "unused".to_owned()).unwrap();
+        let state = AppState::new(
+            server.url(),
+            "unused".to_owned(),
+            "unused".to_owned(),
+            "unused".to_owned(),
+        )
+        .unwrap();
 
         let posts = list_posts(
             &state,

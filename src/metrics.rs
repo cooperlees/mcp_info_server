@@ -16,6 +16,7 @@ pub struct Metrics {
     pub http_requests_total: IntCounterVec,
     pub http_request_duration_seconds: HistogramVec,
     pub client_subnet_requests_total: IntCounterVec,
+    pub client_asn_requests_total: IntCounterVec,
     pub tool_calls_total: IntCounterVec,
     pub tool_call_duration_seconds: HistogramVec,
     cache_requests_total: IntCounterVec,
@@ -65,6 +66,21 @@ impl Metrics {
         .expect("valid metric definition");
         register(&registry, &client_subnet_requests_total);
 
+        // asn/asn_org are 1:1 with subnet in practice (a /24 or /64 belongs
+        // to one announcing network), so this doesn't multiply cardinality
+        // beyond client_subnet_requests_total - it's the same bounded set of
+        // series, enriched. "unknown"/"unknown" until the background lookup
+        // in main.rs resolves it (or permanently, if it never does).
+        let client_asn_requests_total = IntCounterVec::new(
+            Opts::new(
+                "mcp_info_server_client_asn_requests_total",
+                "Total HTTP requests by client subnet, ASN, and ASN org name",
+            ),
+            &["subnet", "asn", "asn_org"],
+        )
+        .expect("valid metric definition");
+        register(&registry, &client_asn_requests_total);
+
         let tool_calls_total = IntCounterVec::new(
             Opts::new(
                 "mcp_info_server_tool_calls_total",
@@ -110,6 +126,7 @@ impl Metrics {
             http_requests_total,
             http_request_duration_seconds,
             client_subnet_requests_total,
+            client_asn_requests_total,
             tool_calls_total,
             tool_call_duration_seconds,
             cache_requests_total,

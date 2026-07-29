@@ -178,9 +178,14 @@ mod tests {
             .create_async()
             .await;
 
-        let state = AppState::new(String::new(), "doc123".to_owned(), "unused".to_owned())
-            .unwrap()
-            .with_resume_base_url(server.url());
+        let state = AppState::new(
+            String::new(),
+            "doc123".to_owned(),
+            "unused".to_owned(),
+            "unused".to_owned(),
+        )
+        .unwrap()
+        .with_resume_base_url(server.url());
 
         let first = get_resume(&state).await.unwrap();
         let second = get_resume(&state).await.unwrap();

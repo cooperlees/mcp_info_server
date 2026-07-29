@@ -196,6 +196,7 @@ mod tests {
                 "https://example.invalid".to_owned(),
                 "doc-id".to_owned(),
                 "https://example.invalid".to_owned(),
+                "https://example.invalid".to_owned(),
             )
             .unwrap(),
         )

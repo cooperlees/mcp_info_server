@@ -11,6 +11,7 @@ description = "Public, unauthenticated MCP server exposing cooperlees.com's blog
 anyhow = "1.0.104"
 axum = "0.8"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "serde"] }
+hickory-resolver = "0.26.1"
 htmd = "0.5"
 moka = { version = "0.12.15", features = ["future"] }
 prometheus = { version = "0.14.0", default-features = false }

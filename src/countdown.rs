@@ -146,7 +146,13 @@ mod tests {
             .with_body(sample_body())
             .create_async()
             .await;
-        let state = AppState::new("unused".to_owned(), "unused".to_owned(), server.url()).unwrap();
+        let state = AppState::new(
+            "unused".to_owned(),
+            "unused".to_owned(),
+            server.url(),
+            "unused".to_owned(),
+        )
+        .unwrap();
 
         let list = list_countdowns(&state).await.unwrap();
 
@@ -167,7 +173,13 @@ mod tests {
             .with_body(sample_body())
             .create_async()
             .await;
-        let state = AppState::new("unused".to_owned(), "unused".to_owned(), server.url()).unwrap();
+        let state = AppState::new(
+            "unused".to_owned(),
+            "unused".to_owned(),
+            server.url(),
+            "unused".to_owned(),
+        )
+        .unwrap();
 
         let countdown = get_countdown(&state, "41st-birthday").await.unwrap();
 
@@ -185,7 +197,13 @@ mod tests {
             .with_body(sample_body())
             .create_async()
             .await;
-        let state = AppState::new("unused".to_owned(), "unused".to_owned(), server.url()).unwrap();
+        let state = AppState::new(
+            "unused".to_owned(),
+            "unused".to_owned(),
+            server.url(),
+            "unused".to_owned(),
+        )
+        .unwrap();
 
         let err = get_countdown(&state, "missing").await.unwrap_err();
 
