@@ -87,7 +87,7 @@ impl Config {
 
 #[tokio::main]
 async fn main() -> Result<(), AppError> {
-    logging::init();
+    let tracer_provider = logging::init();
 
     let config = Config::from_env()?;
     tracing::debug!(
@@ -135,13 +135,22 @@ async fn main() -> Result<(), AppError> {
 
     tracing::info!(%addr, "mcp_info_server listening");
 
-    axum::serve(
+    let serve_result = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
     .with_graceful_shutdown(shutdown_signal())
-    .await
-    .map_err(|e| AppError::Other(format!("server error: {e}")))?;
+    .await;
+
+    // Flush any spans still sitting in the batch queue before exiting,
+    // regardless of how serve() ended - best-effort, never fatal.
+    if let Some(provider) = tracer_provider
+        && let Err(e) = provider.shutdown()
+    {
+        tracing::warn!(error = %e, "failed to flush Jaeger tracer provider on shutdown");
+    }
+
+    serve_result.map_err(|e| AppError::Other(format!("server error: {e}")))?;
 
     Ok(())
 }

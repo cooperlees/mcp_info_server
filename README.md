@@ -127,6 +127,12 @@ have?"*, and the client will invoke `get_resume` / `list_posts` on its own.
   survives this process not having seen the subnet before, since the
   in-process cache doesn't survive a restart), falling back to Team Cymru's
   DNS-based ASN lookup. Never on the request path itself. See `src/asn.rs`.
+- **Distributed tracing**: when `JAEGER_OTLP_ENDPOINT` is set, the same
+  `tracing` spans this server already builds for every request/tool-call
+  (with nested cache-lookup/upstream-fetch spans) are exported to Jaeger via
+  OTLP/gRPC, batched by a background task — never inline with request
+  handling, and bounded so a dead link degrades to no traces, not latency.
+  See `src/logging.rs`.
 
 ## Deployment
 
@@ -180,6 +186,7 @@ default:
 | `RESUME_DOC_ID` | Cooper's resume doc ID | The Google Doc ID (the `.../d/<ID>/edit` part) |
 | `COUNTDOWN_URL` | `https://countdown.cooperlees.com` | Base URL for the countdown JSON API |
 | `PROMETHEUS_URL` | `http://prometheus:9090` | Where this server's own metrics get scraped from — queried (read-only) to skip a Cymru DNS round trip when a client subnet's ASN is already known from a prior process lifetime, since the in-process ASN cache doesn't survive a restart. See [Metrics](#metrics). |
+| `JAEGER_OTLP_ENDPOINT` | unset (disabled) | gRPC OTLP endpoint (e.g. `http://[fd00:68::25]:4317`) every `tracing` span already built in this server is additionally exported to — request/tool-call spans, with nested cache-lookup/upstream-fetch detail, at full (debug-equivalent) fidelity regardless of `RUST_LOG`. Opt-in and off the request path entirely: batched and exported by a background task, with both the TCP connect and the RPC call bounded to 5s, so a dead link (this normally crosses a home VPN) degrades to "no traces," never request latency. See `src/logging.rs`. |
 | `LISTEN_PORT` | `6969` | |
 | `ALLOWED_HOSTS` | `localhost,127.0.0.1,::1` | Comma-separated `Host` header allowlist — rmcp's Streamable HTTP transport rejects any request whose `Host` isn't in this list (DNS-rebinding protection). **A public deployment must add its own hostname here or every real request gets a 403** — the ansible role sets this to `mcp.cooperlees.com,localhost,127.0.0.1,::1`. |
 | `RUST_LOG` | `info` | Standard `tracing_subscriber::EnvFilter` syntax. Logs are glog-formatted on stderr (`Immdd hh:mm:ss.uuuuuu pid file:line] message`). `info` (the default) logs startup/shutdown, any request/tool-call warnings, and one access-log line (`http_request`) per HTTP request with `client_ip`, `method`, `route`, `status`, `duration_ms` — `client_ip` is read from `X-Forwarded-For` (Traefik sets it; falls back to the raw TCP peer otherwise), never a Prometheus label, to keep metric cardinality bounded on a public endpoint. `RUST_LOG=mcp_info_server=debug` additionally logs a span per HTTP request and MCP tool call (with nested spans for cache lookups and upstream fetches) plus a `close` line with `time.busy`/`time.idle` for each — `RUST_LOG=debug` does the same but also pulls in `reqwest`/`hyper`/`rustls` internals, which is a lot noisier. |
@@ -263,6 +270,8 @@ src/resume_route.rs     plain GET /coopers-resume handler, reuses resume.rs
 src/countdown.rs        countdown.cooperlees.com JSON API client + typed structs
 src/asn.rs              client subnet -> ASN + org name (Prometheus check,
                         then Cymru DNS fallback), off the request path
+src/logging.rs          tracing subscriber setup: glog-on-stderr always,
+                        optional OTLP export to Jaeger
 ```
 
 Built with [`rmcp`](https://github.com/modelcontextprotocol/rust-sdk) (the
