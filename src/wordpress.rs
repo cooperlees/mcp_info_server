@@ -321,6 +321,7 @@ mod tests {
             "unused".to_owned(),
             "unused".to_owned(),
             "unused".to_owned(),
+            crate::rate_limit::RateLimitConfig::permissive(),
         )
         .unwrap();
 
@@ -344,6 +345,7 @@ mod tests {
             "unused".to_owned(),
             "unused".to_owned(),
             "unused".to_owned(),
+            crate::rate_limit::RateLimitConfig::permissive(),
         )
         .unwrap();
 
@@ -375,6 +377,7 @@ mod tests {
             "unused".to_owned(),
             "unused".to_owned(),
             "unused".to_owned(),
+            crate::rate_limit::RateLimitConfig::permissive(),
         )
         .unwrap();
 

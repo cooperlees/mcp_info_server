@@ -7,6 +7,7 @@ use moka::future::Cache;
 
 use crate::asn::{self, AsnInfo};
 use crate::metrics::Metrics;
+use crate::rate_limit::{RateLimitConfig, SubnetRateLimiter};
 use crate::resume::ResumeDocument;
 
 /// Errors surfaced by fetch/convert paths, always rendered to callers as plain text.
@@ -76,6 +77,8 @@ pub struct AppState {
     countdown_cache: Cache<String, Arc<str>>,
     asn_resolver: TokioResolver,
     asn_cache: Cache<String, Option<Arc<AsnInfo>>>,
+    rate_limiter: Arc<SubnetRateLimiter>,
+    rate_limit_allowlist: crate::rate_limit::Allowlist,
 }
 
 impl AppState {
@@ -84,6 +87,7 @@ impl AppState {
         resume_doc_id: String,
         countdown_url: String,
         prometheus_url: String,
+        rate_limit: RateLimitConfig,
     ) -> Result<Self, AppError> {
         let http = reqwest::Client::builder()
             .user_agent(concat!("mcp_info_server/", env!("CARGO_PKG_VERSION")))
@@ -91,6 +95,7 @@ impl AppState {
         let asn_resolver = TokioResolver::builder_tokio()
             .and_then(|builder| builder.build())
             .map_err(|e| AppError::Other(format!("failed to initialize DNS resolver: {e}")))?;
+        let rate_limiter = Arc::new(rate_limit.new_limiter());
         Ok(Self {
             http,
             wordpress_url,
@@ -104,6 +109,8 @@ impl AppState {
             countdown_cache: Cache::builder().time_to_live(COUNTDOWN_CACHE_TTL).build(),
             asn_resolver,
             asn_cache: Cache::builder().time_to_live(ASN_CACHE_TTL).build(),
+            rate_limiter,
+            rate_limit_allowlist: rate_limit.allowlist,
         })
     }
 
@@ -233,6 +240,29 @@ impl AppState {
         self.metrics.record_cache("asn", hit);
         entry.into_value()
     }
+
+    /// `Some(retry_after)` if `subnet` is currently rate limited and `ip`
+    /// isn't on `RATE_LIMIT_ALLOWLIST` — `None` means the request proceeds
+    /// (and, for a non-allowlisted caller, has already been recorded
+    /// against that subnet's quota; allowlisted callers never touch the
+    /// limiter at all, so they can't affect anyone else's quota either).
+    pub fn check_rate_limit(&self, ip: IpAddr, subnet: &str) -> Option<Duration> {
+        if self.rate_limit_allowlist.contains(ip) {
+            return None;
+        }
+        crate::rate_limit::check(&self.rate_limiter, subnet)
+    }
+
+    /// Drops rate-limiter state for subnets that have gone fully idle (back
+    /// to their unthrottled starting state) and releases the freed
+    /// capacity — the limiter's own keyed store never does this on its own,
+    /// so left unchecked, memory grows with every distinct subnet this
+    /// process has ever seen, for the life of the process. Meant to be
+    /// called periodically (see `main.rs`), not from the request path.
+    pub fn rate_limiter_gc_tick(&self) {
+        self.rate_limiter.retain_recent();
+        self.rate_limiter.shrink_to_fit();
+    }
 }
 
 #[cfg(test)]
@@ -255,6 +285,7 @@ mod tests {
             "unused".to_owned(),
             "unused".to_owned(),
             "unused".to_owned(),
+            crate::rate_limit::RateLimitConfig::permissive(),
         )
         .unwrap();
         let url = format!("{}/thing", server.url());
@@ -281,6 +312,7 @@ mod tests {
             "unused".to_owned(),
             "unused".to_owned(),
             "unused".to_owned(),
+            crate::rate_limit::RateLimitConfig::permissive(),
         )
         .unwrap();
         let url = format!("{}/missing", server.url());
@@ -306,6 +338,7 @@ mod tests {
             "unused".to_owned(),
             server.url(),
             "unused".to_owned(),
+            crate::rate_limit::RateLimitConfig::permissive(),
         )
         .unwrap();
         let url = format!("{}/", server.url());

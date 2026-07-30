@@ -206,6 +206,7 @@ mod tests {
                 "doc-id".to_owned(),
                 "https://example.invalid".to_owned(),
                 "https://example.invalid".to_owned(),
+                crate::rate_limit::RateLimitConfig::permissive(),
             )
             .unwrap(),
         )

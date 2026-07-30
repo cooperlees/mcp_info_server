@@ -4,19 +4,22 @@ mod html_convert;
 mod logging;
 mod mcp_server;
 mod metrics;
+mod rate_limit;
 mod resume;
 mod resume_route;
 mod state;
 mod wordpress;
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::num::NonZeroU32;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::Router;
 use axum::extract::{ConnectInfo, MatchedPath, State};
 use axum::http::{HeaderMap, Request, StatusCode};
 use axum::middleware::{self, Next};
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use rmcp::transport::StreamableHttpServerConfig;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
@@ -24,6 +27,7 @@ use rmcp::transport::streamable_http_server::tower::StreamableHttpService;
 use tracing::Instrument;
 
 use crate::mcp_server::InfoServer;
+use crate::rate_limit::{Allowlist, RateLimitConfig};
 use crate::state::{AppError, AppState};
 
 const DEFAULT_WORDPRESS_URL: &str = "https://cooperlees.com";
@@ -41,6 +45,18 @@ const DEFAULT_LISTEN_PORT: u16 = 6969;
 /// only, so a public deployment behind Traefik must add its own hostname via
 /// `ALLOWED_HOSTS`, or every real request gets a 403.
 const DEFAULT_ALLOWED_HOSTS: &str = "localhost,127.0.0.1,::1";
+/// Sustained requests/second and burst allowance per client *subnet* (not
+/// exact IP — see `rate_limit.rs`) before `track_http_metrics` starts
+/// returning 429. Generous enough for a normal handful of rapid MCP tool
+/// calls in one session; still bounds a runaway script to a two-digit
+/// requests/minute ceiling.
+const DEFAULT_RATE_LIMIT_PER_SECOND: u32 = 5;
+const DEFAULT_RATE_LIMIT_BURST: u32 = 20;
+/// How often to drop rate-limiter state for subnets that have gone idle —
+/// not configurable, this is purely an internal memory-bound housekeeping
+/// detail, not a rate-limiting behavior. See
+/// `AppState::rate_limiter_gc_tick`.
+const RATE_LIMITER_GC_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 struct Config {
     wordpress_url: String,
@@ -49,6 +65,7 @@ struct Config {
     prometheus_url: String,
     listen_port: u16,
     allowed_hosts: Vec<String>,
+    rate_limit: RateLimitConfig,
 }
 
 impl Config {
@@ -73,6 +90,12 @@ impl Config {
             .map(|s| s.trim().to_owned())
             .filter(|s| !s.is_empty())
             .collect();
+        let rate_limit = RateLimitConfig {
+            per_second: env_nonzero_u32("RATE_LIMIT_PER_SECOND", DEFAULT_RATE_LIMIT_PER_SECOND)?,
+            burst: env_nonzero_u32("RATE_LIMIT_BURST", DEFAULT_RATE_LIMIT_BURST)?,
+            allowlist: Allowlist::parse(&std::env::var("RATE_LIMIT_ALLOWLIST").unwrap_or_default())
+                .map_err(|e| AppError::Other(format!("RATE_LIMIT_ALLOWLIST: {e}")))?,
+        };
 
         Ok(Self {
             wordpress_url,
@@ -81,8 +104,24 @@ impl Config {
             prometheus_url,
             listen_port,
             allowed_hosts,
+            rate_limit,
         })
     }
+}
+
+fn env_nonzero_u32(var: &str, default: u32) -> Result<NonZeroU32, AppError> {
+    let raw = match std::env::var(var) {
+        Ok(raw) => raw,
+        Err(_) => {
+            return Ok(
+                NonZeroU32::new(default).expect("DEFAULT_RATE_LIMIT_* constants are non-zero")
+            );
+        }
+    };
+    let parsed: u32 = raw
+        .parse()
+        .map_err(|e| AppError::Other(format!("{var} {raw:?} is not a valid number: {e}")))?;
+    NonZeroU32::new(parsed).ok_or_else(|| AppError::Other(format!("{var} must be greater than 0")))
 }
 
 #[tokio::main]
@@ -97,6 +136,8 @@ async fn main() -> Result<(), AppError> {
         prometheus_url = %config.prometheus_url,
         listen_port = config.listen_port,
         allowed_hosts = ?config.allowed_hosts,
+        rate_limit_per_second = config.rate_limit.per_second.get(),
+        rate_limit_burst = config.rate_limit.burst.get(),
         "config loaded",
     );
     let state = AppState::new(
@@ -104,7 +145,19 @@ async fn main() -> Result<(), AppError> {
         config.resume_doc_id.clone(),
         config.countdown_url.clone(),
         config.prometheus_url.clone(),
+        config.rate_limit.clone(),
     )?;
+
+    tokio::spawn({
+        let state = state.clone();
+        async move {
+            let mut interval = tokio::time::interval(RATE_LIMITER_GC_INTERVAL);
+            loop {
+                interval.tick().await;
+                state.rate_limiter_gc_tick();
+            }
+        }
+    });
 
     let mcp_state = state.clone();
     let mcp_service = StreamableHttpService::new(
@@ -205,6 +258,23 @@ fn ipv4_slash24(v4: Ipv4Addr) -> String {
     format!("{}.{}.{}.0/24", o[0], o[1], o[2])
 }
 
+/// A `Retry-After` is required by nothing here, but it's the one piece of
+/// information a well-behaved caller actually wants out of a 429: exactly
+/// how long to back off. Rounded up to whole seconds (and at least 1) so a
+/// caller that waits exactly the stated time never retries too early.
+fn rate_limited_response(retry_after: Duration) -> Response {
+    let retry_after_secs = retry_after.as_secs_f64().ceil().max(1.0) as u64;
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        [(
+            axum::http::header::RETRY_AFTER,
+            retry_after_secs.to_string(),
+        )],
+        "rate limit exceeded\n",
+    )
+        .into_response()
+}
+
 /// Records `mcp_info_server_http_requests_total` and
 /// `_http_request_duration_seconds` for every request, labeled by the
 /// matched route template (never the raw path — `/mcp` carries every MCP
@@ -220,6 +290,12 @@ fn ipv4_slash24(v4: Ipv4Addr) -> String {
 /// additionally resolves that subnet's ASN (`asn` module) and records it on
 /// `mcp_info_server_client_asn_requests_total` once resolution completes —
 /// never on the request path itself, and "unknown"/"unknown" until it is.
+///
+/// Also where rate limiting happens (`AppState::check_rate_limit`, keyed by
+/// the same `client_subnet` — see `rate_limit.rs`): a rejected request never
+/// reaches `next.run()`, so it never touches an actual handler, but it's
+/// still counted in every metric/log line below with `status=429`, same as
+/// a normal request.
 async fn track_http_metrics(
     State(state): State<AppState>,
     matched_path: Option<MatchedPath>,
@@ -238,13 +314,23 @@ async fn track_http_metrics(
 
     async move {
         let start = std::time::Instant::now();
-        let timer = state
-            .metrics
-            .http_request_duration_seconds
-            .with_label_values(&[&route, &method])
-            .start_timer();
-        let response = next.run(req).await;
-        timer.observe_duration();
+        let subnet = client_subnet(&client_ip);
+        let parsed_ip = client_ip.parse::<IpAddr>().map(normalize_ip).ok();
+        let retry_after = parsed_ip.and_then(|ip| state.check_rate_limit(ip, &subnet));
+
+        let response = match retry_after {
+            Some(retry_after) => rate_limited_response(retry_after),
+            None => {
+                let timer = state
+                    .metrics
+                    .http_request_duration_seconds
+                    .with_label_values(&[&route, &method])
+                    .start_timer();
+                let response = next.run(req).await;
+                timer.observe_duration();
+                response
+            }
+        };
         let duration_ms = start.elapsed().as_secs_f64() * 1000.0;
 
         let status = response.status();
@@ -253,7 +339,6 @@ async fn track_http_metrics(
             .http_requests_total
             .with_label_values(&[&route, &method, &status.as_u16().to_string()])
             .inc();
-        let subnet = client_subnet(&client_ip);
         state
             .metrics
             .client_subnet_requests_total
@@ -263,7 +348,7 @@ async fn track_http_metrics(
         // never worth holding the response up for, so it runs after we've
         // already got `response` in hand, in a detached task. Cheap on a
         // cache hit (the overwhelmingly common case) either way.
-        if let Ok(ip) = client_ip.parse::<IpAddr>().map(normalize_ip) {
+        if let Some(ip) = parsed_ip {
             let state = state.clone();
             tokio::spawn(async move {
                 let info = state.lookup_asn_cached(&subnet, ip).await;
@@ -286,6 +371,14 @@ async fn track_http_metrics(
             duration_ms,
             "http_request"
         );
+        // Deliberately no extra warn! for 429s specifically: unlike the
+        // (cached, at-most-once-per-24h) ASN lookup failure log, nothing
+        // here is deduplicated - the whole point of a 429 is that it can
+        // happen every request during exactly the burst this exists to
+        // survive, and a warn! per rejection would turn the protection
+        // itself into a logging flood. The existing info-level
+        // `http_request` line already carries status=429 for every request,
+        // rate limited or not - that's the record.
         if status.is_server_error() {
             tracing::warn!(%status, "request failed");
         } else {

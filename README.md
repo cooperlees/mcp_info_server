@@ -133,6 +133,10 @@ have?"*, and the client will invoke `get_resume` / `list_posts` on its own.
   OTLP/gRPC, batched by a background task — never inline with request
   handling, and bounded so a dead link degrades to no traces, not latency.
   See `src/logging.rs`.
+- **Rate limiting**: every request is checked against a per-subnet GCRA
+  limiter before it reaches any handler, with an IP/CIDR allowlist that
+  bypasses it entirely — see [Rate limiting](#rate-limiting) for the full
+  picture and `src/rate_limit.rs` for the implementation.
 
 ## Deployment
 
@@ -189,9 +193,38 @@ default:
 | `JAEGER_OTLP_ENDPOINT` | unset (disabled) | gRPC OTLP endpoint (e.g. `http://[fd00:68::25]:4317`) every `tracing` span already built in this server is additionally exported to — request/tool-call spans, with nested cache-lookup/upstream-fetch detail, at full (debug-equivalent) fidelity regardless of `RUST_LOG`. Opt-in and off the request path entirely: batched and exported by a background task, with both the TCP connect and the RPC call bounded to 5s, so a dead link (this normally crosses a home VPN) degrades to "no traces," never request latency. See `src/logging.rs`. |
 | `LISTEN_PORT` | `6969` | |
 | `ALLOWED_HOSTS` | `localhost,127.0.0.1,::1` | Comma-separated `Host` header allowlist — rmcp's Streamable HTTP transport rejects any request whose `Host` isn't in this list (DNS-rebinding protection). **A public deployment must add its own hostname here or every real request gets a 403** — the ansible role sets this to `mcp.cooperlees.com,localhost,127.0.0.1,::1`. |
+| `RATE_LIMIT_PER_SECOND` | `5` | Sustained requests/second allowed per client *subnet* (`/24` v4, `/64` v6 — not the exact IP, since a single caller can trivially rotate through many addresses within its own subnet) before further requests get `429 Too Many Requests` with a `Retry-After` header. See [Rate limiting](#rate-limiting). |
+| `RATE_LIMIT_BURST` | `20` | Burst allowance on top of the sustained rate — how many requests a subnet can make in one go after being idle. |
+| `RATE_LIMIT_ALLOWLIST` | unset (empty) | Comma-separated IPs and/or CIDR ranges (e.g. `10.251.254.20,2600:1702:7310:20e0::/64`) exempt from rate limiting entirely — every other metric/log still records their requests, they just never get a 429. A bare IP is treated as an exact-match `/32` or `/128`. |
 | `RUST_LOG` | `info` | Standard `tracing_subscriber::EnvFilter` syntax. Logs are glog-formatted on stderr (`Immdd hh:mm:ss.uuuuuu pid file:line] message`). `info` (the default) logs startup/shutdown, any request/tool-call warnings, and one access-log line (`http_request`) per HTTP request with `client_ip`, `method`, `route`, `status`, `duration_ms` — `client_ip` is read from `X-Forwarded-For` (Traefik sets it; falls back to the raw TCP peer otherwise), never a Prometheus label, to keep metric cardinality bounded on a public endpoint. `RUST_LOG=mcp_info_server=debug` additionally logs a span per HTTP request and MCP tool call (with nested spans for cache lookups and upstream fetches) plus a `close` line with `time.busy`/`time.idle` for each — `RUST_LOG=debug` does the same but also pulls in `reqwest`/`hyper`/`rustls` internals, which is a lot noisier. |
 
 None of this is secret — no vault entry needed for deployment.
+
+## Rate limiting
+
+Every request — every HTTP route and every MCP tool call, since they all share the one
+`track_http_metrics` middleware — is rate limited per client *subnet* (`/24` for IPv4, `/64` for
+IPv6, the same grouping as `client_subnet_requests_total`; see [Metrics](#metrics)), using the
+[`governor`](https://docs.rs/governor) crate's GCRA algorithm: `RATE_LIMIT_PER_SECOND` sustained,
+with a `RATE_LIMIT_BURST` allowance on top for a normal handful of rapid MCP tool calls in one
+session. A subnet that exceeds it gets `429 Too Many Requests` with a `Retry-After` header stating
+exactly how long to back off, for every request until its bucket drains.
+
+Keyed by subnet rather than the exact client IP for the same reason the metric is: a single
+abusive caller can trivially rotate through many addresses within its own subnet (IPv6 privacy
+addresses do this routinely even for perfectly ordinary clients), so limiting by exact IP would
+barely limit anything.
+
+`RATE_LIMIT_ALLOWLIST` exempts specific IPs/CIDR ranges from rate limiting entirely — for
+monitoring infrastructure, trusted internal callers, etc. Allowlisted requests still show up in
+every metric and log line as normal; they just never receive a 429. The ansible role allowlists
+this box's own Prometheus.
+
+A rejected request never reaches its handler (so it can't touch any upstream API, cache, or MCP
+tool logic) but is still counted in `http_requests_total`/`client_subnet_requests_total` and
+logged via the usual `http_request` access-log line with `status=429`, the same as any other
+request — see [Configuration](#configuration) for the env vars and [`src/rate_limit.rs`](src/rate_limit.rs)
+for the implementation.
 
 ## Running locally
 
@@ -238,8 +271,8 @@ markup, not a hand-simplified stand-in.
 
 | Metric | Type | Labels | What it's for |
 |---|---|---|---|
-| `http_requests_total` | counter | `route`, `method`, `status` | Requests per HTTP route (`/`, `/mcp`, `/coopers-resume`, `/healthz`, `/metrics`) |
-| `http_request_duration_seconds` | histogram | `route`, `method` | Latency per HTTP route |
+| `http_requests_total` | counter | `route`, `method`, `status` | Requests per HTTP route (`/`, `/mcp`, `/coopers-resume`, `/healthz`, `/metrics`) — includes rate-limited requests as `status="429"`, see [Rate limiting](#rate-limiting) |
+| `http_request_duration_seconds` | histogram | `route`, `method` | Latency per HTTP route — excludes rate-limited requests (they never reach a handler, so there's no meaningful processing duration to record) |
 | `client_subnet_requests_total` | counter | `subnet` | Requests by client subnet (`/24` for IPv4, `/64` for IPv6 — the raw `client_ip` is never a label, only in the `http_request` log line, to keep this bounded on a public endpoint) |
 | `client_asn_requests_total` | counter | `subnet`, `asn`, `asn_org` | Requests by client subnet enriched with its announcing ASN + org name (`"unknown"`/`"unknown"` until resolved, or permanently for non-public/unresolvable subnets). Resolved off the request path by a detached task — see `src/asn.rs` — via a same-box Prometheus check first, falling back to [Team Cymru's DNS-based ASN lookup](https://team-cymru.com/community-services/ip-asn-mapping/) |
 | `tool_calls_total` | counter | `tool`, `result` (`ok`/`error`) | Calls per MCP tool — since all 7 tools share the one `/mcp` route, this is where the per-tool breakdown actually lives |
@@ -272,6 +305,7 @@ src/asn.rs              client subnet -> ASN + org name (Prometheus check,
                         then Cymru DNS fallback), off the request path
 src/logging.rs          tracing subscriber setup: glog-on-stderr always,
                         optional OTLP export to Jaeger
+src/rate_limit.rs       per-subnet GCRA rate limiting + IP/CIDR allowlist
 ```
 
 Built with [`rmcp`](https://github.com/modelcontextprotocol/rust-sdk) (the

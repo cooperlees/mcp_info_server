@@ -183,6 +183,7 @@ mod tests {
             "doc123".to_owned(),
             "unused".to_owned(),
             "unused".to_owned(),
+            crate::rate_limit::RateLimitConfig::permissive(),
         )
         .unwrap()
         .with_resume_base_url(server.url());
