@@ -132,7 +132,10 @@ have?"*, and the client will invoke `get_resume` / `list_posts` on its own.
   (with nested cache-lookup/upstream-fetch spans) are exported to Jaeger via
   OTLP/gRPC, batched by a background task — never inline with request
   handling, and bounded so a dead link degrades to no traces, not latency.
-  See `src/logging.rs`.
+  Every `http_request` log line also carries the current span's `trace_id`
+  (`"unknown"` when tracing export is disabled), so a specific request in
+  Loki/Grafana can be jumped straight to its Jaeger waterfall. See
+  `src/logging.rs`.
 - **Rate limiting**: every request is checked against a per-subnet GCRA
   limiter before it reaches any handler, with an IP/CIDR allowlist that
   bypasses it entirely — see [Rate limiting](#rate-limiting) for the full
@@ -196,7 +199,7 @@ default:
 | `RATE_LIMIT_PER_SECOND` | `5` | Sustained requests/second allowed per client *subnet* (`/24` v4, `/64` v6 — not the exact IP, since a single caller can trivially rotate through many addresses within its own subnet) before further requests get `429 Too Many Requests` with a `Retry-After` header. See [Rate limiting](#rate-limiting). |
 | `RATE_LIMIT_BURST` | `20` | Burst allowance on top of the sustained rate — how many requests a subnet can make in one go after being idle. |
 | `RATE_LIMIT_ALLOWLIST` | unset (empty) | Comma-separated IPs and/or CIDR ranges (e.g. `10.251.254.20,2600:1702:7310:20e0::/64`) exempt from rate limiting entirely — every other metric/log still records their requests, they just never get a 429. A bare IP is treated as an exact-match `/32` or `/128`. |
-| `RUST_LOG` | `info` | Standard `tracing_subscriber::EnvFilter` syntax. Logs are glog-formatted on stderr (`Immdd hh:mm:ss.uuuuuu pid file:line] message`). `info` (the default) logs startup/shutdown, any request/tool-call warnings, and one access-log line (`http_request`) per HTTP request with `client_ip`, `method`, `route`, `status`, `duration_ms` — `client_ip` is read from `X-Forwarded-For` (Traefik sets it; falls back to the raw TCP peer otherwise), never a Prometheus label, to keep metric cardinality bounded on a public endpoint. `RUST_LOG=mcp_info_server=debug` additionally logs a span per HTTP request and MCP tool call (with nested spans for cache lookups and upstream fetches) plus a `close` line with `time.busy`/`time.idle` for each — `RUST_LOG=debug` does the same but also pulls in `reqwest`/`hyper`/`rustls` internals, which is a lot noisier. |
+| `RUST_LOG` | `info` | Standard `tracing_subscriber::EnvFilter` syntax. Logs are glog-formatted on stderr (`Immdd hh:mm:ss.uuuuuu pid file:line] message`). `info` (the default) logs startup/shutdown, any request/tool-call warnings, and one access-log line (`http_request`) per HTTP request with `client_ip`, `method`, `route`, `status`, `duration_ms`, `trace_id` — `client_ip` is read from `X-Forwarded-For` (Traefik sets it; falls back to the raw TCP peer otherwise), never a Prometheus label, to keep metric cardinality bounded on a public endpoint; `trace_id` is the Jaeger trace ID (`"unknown"` unless `JAEGER_OTLP_ENDPOINT` is set) — see [Distributed tracing](#how-it-works). `RUST_LOG=mcp_info_server=debug` additionally logs a span per HTTP request and MCP tool call (with nested spans for cache lookups and upstream fetches) plus a `close` line with `time.busy`/`time.idle` for each — `RUST_LOG=debug` does the same but also pulls in `reqwest`/`hyper`/`rustls` internals, which is a lot noisier. |
 
 None of this is secret — no vault entry needed for deployment.
 

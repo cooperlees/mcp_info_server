@@ -275,6 +275,28 @@ fn rate_limited_response(retry_after: Duration) -> Response {
         .into_response()
 }
 
+/// The current span's OpenTelemetry trace ID, formatted the same way
+/// Jaeger displays/searches it (32 lowercase hex chars) — lets a human
+/// jump from a Loki log line straight to the matching Jaeger trace,
+/// wired via Grafana's Loki datasource `derivedFields` config. `"unknown"`
+/// whenever `JAEGER_OTLP_ENDPOINT` is unset, since then there's no real
+/// OTel context to report (the span still exists for the `RUST_LOG=debug`
+/// span tree, it's just never exported).
+fn current_trace_id() -> String {
+    use opentelemetry::trace::TraceContextExt;
+    use tracing_opentelemetry::OpenTelemetrySpanExt;
+    let span_context = tracing::Span::current()
+        .context()
+        .span()
+        .span_context()
+        .clone();
+    if span_context.is_valid() {
+        span_context.trace_id().to_string()
+    } else {
+        "unknown".to_owned()
+    }
+}
+
 /// Records `mcp_info_server_http_requests_total` and
 /// `_http_request_duration_seconds` for every request, labeled by the
 /// matched route template (never the raw path — `/mcp` carries every MCP
@@ -369,6 +391,7 @@ async fn track_http_metrics(
             %route,
             status = status.as_u16(),
             duration_ms,
+            trace_id = %current_trace_id(),
             "http_request"
         );
         // Deliberately no extra warn! for 429s specifically: unlike the
