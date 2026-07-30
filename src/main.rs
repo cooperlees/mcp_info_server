@@ -200,7 +200,7 @@ async fn main() -> Result<(), AppError> {
     if let Some(provider) = tracer_provider
         && let Err(e) = provider.shutdown()
     {
-        tracing::warn!(error = %e, "failed to flush Jaeger tracer provider on shutdown");
+        tracing::warn!(error = %e, "failed to flush OTLP tracer provider on shutdown");
     }
 
     serve_result.map_err(|e| AppError::Other(format!("server error: {e}")))?;
@@ -275,13 +275,13 @@ fn rate_limited_response(retry_after: Duration) -> Response {
         .into_response()
 }
 
-/// The current span's OpenTelemetry trace ID, formatted the same way
-/// Jaeger displays/searches it (32 lowercase hex chars) — lets a human
-/// jump from a Loki log line straight to the matching Jaeger trace,
-/// wired via Grafana's Loki datasource `derivedFields` config. `"unknown"`
-/// whenever `JAEGER_OTLP_ENDPOINT` is unset, since then there's no real
-/// OTel context to report (the span still exists for the `RUST_LOG=debug`
-/// span tree, it's just never exported).
+/// The current span's OpenTelemetry trace ID, formatted the standard way
+/// (32 lowercase hex chars) tracing backends like Tempo/Jaeger display and
+/// search by — lets a human jump from a Loki log line straight to the
+/// matching trace, wired via Grafana's Loki datasource `derivedFields`
+/// config. `"unknown"` whenever `OTLP_ENDPOINT` is unset, since then
+/// there's no real OTel context to report (the span still exists for the
+/// `RUST_LOG=debug` span tree, it's just never exported).
 fn current_trace_id() -> String {
     use opentelemetry::trace::TraceContextExt;
     use tracing_opentelemetry::OpenTelemetrySpanExt;

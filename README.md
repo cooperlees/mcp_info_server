@@ -127,14 +127,15 @@ have?"*, and the client will invoke `get_resume` / `list_posts` on its own.
   survives this process not having seen the subnet before, since the
   in-process cache doesn't survive a restart), falling back to Team Cymru's
   DNS-based ASN lookup. Never on the request path itself. See `src/asn.rs`.
-- **Distributed tracing**: when `JAEGER_OTLP_ENDPOINT` is set, the same
-  `tracing` spans this server already builds for every request/tool-call
-  (with nested cache-lookup/upstream-fetch spans) are exported to Jaeger via
-  OTLP/gRPC, batched by a background task — never inline with request
-  handling, and bounded so a dead link degrades to no traces, not latency.
-  Every `http_request` log line also carries the current span's `trace_id`
+- **Distributed tracing**: when `OTLP_ENDPOINT` is set, the same `tracing`
+  spans this server already builds for every request/tool-call (with nested
+  cache-lookup/upstream-fetch spans) are exported over OTLP/gRPC (Tempo in
+  the actual deployment, though any OTLP/gRPC-compatible collector works),
+  batched by a background task — never inline with request handling, and
+  bounded so a dead link degrades to no traces, not latency. Every
+  `http_request` log line also carries the current span's `trace_id`
   (`"unknown"` when tracing export is disabled), so a specific request in
-  Loki/Grafana can be jumped straight to its Jaeger waterfall. See
+  Loki/Grafana can be jumped straight to its trace waterfall. See
   `src/logging.rs`.
 - **Rate limiting**: every request is checked against a per-subnet GCRA
   limiter before it reaches any handler, with an IP/CIDR allowlist that
@@ -193,13 +194,13 @@ default:
 | `RESUME_DOC_ID` | Cooper's resume doc ID | The Google Doc ID (the `.../d/<ID>/edit` part) |
 | `COUNTDOWN_URL` | `https://countdown.cooperlees.com` | Base URL for the countdown JSON API |
 | `PROMETHEUS_URL` | `http://prometheus:9090` | Where this server's own metrics get scraped from — queried (read-only) to skip a Cymru DNS round trip when a client subnet's ASN is already known from a prior process lifetime, since the in-process ASN cache doesn't survive a restart. See [Metrics](#metrics). |
-| `JAEGER_OTLP_ENDPOINT` | unset (disabled) | gRPC OTLP endpoint (e.g. `http://[fd00:68::25]:4317`) every `tracing` span already built in this server is additionally exported to — request/tool-call spans, with nested cache-lookup/upstream-fetch detail, at full (debug-equivalent) fidelity regardless of `RUST_LOG`. Opt-in and off the request path entirely: batched and exported by a background task, with both the TCP connect and the RPC call bounded to 5s, so a dead link (this normally crosses a home VPN) degrades to "no traces," never request latency. See `src/logging.rs`. |
+| `OTLP_ENDPOINT` | unset (disabled) | gRPC OTLP endpoint (e.g. `http://[fd00:251::26]:4317` for the Tempo instance this deploys with, though any OTLP/gRPC-compatible collector works) every `tracing` span already built in this server is additionally exported to — request/tool-call spans, with nested cache-lookup/upstream-fetch detail, at full (debug-equivalent) fidelity regardless of `RUST_LOG`. Opt-in and off the request path entirely: batched and exported by a background task, with both the TCP connect and the RPC call bounded to 5s, so a dead link degrades to "no traces," never request latency. See `src/logging.rs`. |
 | `LISTEN_PORT` | `6969` | |
 | `ALLOWED_HOSTS` | `localhost,127.0.0.1,::1` | Comma-separated `Host` header allowlist — rmcp's Streamable HTTP transport rejects any request whose `Host` isn't in this list (DNS-rebinding protection). **A public deployment must add its own hostname here or every real request gets a 403** — the ansible role sets this to `mcp.cooperlees.com,localhost,127.0.0.1,::1`. |
 | `RATE_LIMIT_PER_SECOND` | `5` | Sustained requests/second allowed per client *subnet* (`/24` v4, `/64` v6 — not the exact IP, since a single caller can trivially rotate through many addresses within its own subnet) before further requests get `429 Too Many Requests` with a `Retry-After` header. See [Rate limiting](#rate-limiting). |
 | `RATE_LIMIT_BURST` | `20` | Burst allowance on top of the sustained rate — how many requests a subnet can make in one go after being idle. |
 | `RATE_LIMIT_ALLOWLIST` | unset (empty) | Comma-separated IPs and/or CIDR ranges (e.g. `10.251.254.20,2600:1702:7310:20e0::/64`) exempt from rate limiting entirely — every other metric/log still records their requests, they just never get a 429. A bare IP is treated as an exact-match `/32` or `/128`. |
-| `RUST_LOG` | `info` | Standard `tracing_subscriber::EnvFilter` syntax. Logs are glog-formatted on stderr (`Immdd hh:mm:ss.uuuuuu pid file:line] message`). `info` (the default) logs startup/shutdown, any request/tool-call warnings, and one access-log line (`http_request`) per HTTP request with `client_ip`, `method`, `route`, `status`, `duration_ms`, `trace_id` — `client_ip` is read from `X-Forwarded-For` (Traefik sets it; falls back to the raw TCP peer otherwise), never a Prometheus label, to keep metric cardinality bounded on a public endpoint; `trace_id` is the Jaeger trace ID (`"unknown"` unless `JAEGER_OTLP_ENDPOINT` is set) — see [Distributed tracing](#how-it-works). `RUST_LOG=mcp_info_server=debug` additionally logs a span per HTTP request and MCP tool call (with nested spans for cache lookups and upstream fetches) plus a `close` line with `time.busy`/`time.idle` for each — `RUST_LOG=debug` does the same but also pulls in `reqwest`/`hyper`/`rustls` internals, which is a lot noisier. |
+| `RUST_LOG` | `info` | Standard `tracing_subscriber::EnvFilter` syntax. Logs are glog-formatted on stderr (`Immdd hh:mm:ss.uuuuuu pid file:line] message`). `info` (the default) logs startup/shutdown, any request/tool-call warnings, and one access-log line (`http_request`) per HTTP request with `client_ip`, `method`, `route`, `status`, `duration_ms`, `trace_id` — `client_ip` is read from `X-Forwarded-For` (Traefik sets it; falls back to the raw TCP peer otherwise), never a Prometheus label, to keep metric cardinality bounded on a public endpoint; `trace_id` is the OTLP trace ID (`"unknown"` unless `OTLP_ENDPOINT` is set) — see [Distributed tracing](#how-it-works). `RUST_LOG=mcp_info_server=debug` additionally logs a span per HTTP request and MCP tool call (with nested spans for cache lookups and upstream fetches) plus a `close` line with `time.busy`/`time.idle` for each — `RUST_LOG=debug` does the same but also pulls in `reqwest`/`hyper`/`rustls` internals, which is a lot noisier. |
 
 None of this is secret — no vault entry needed for deployment.
 
@@ -307,7 +308,7 @@ src/countdown.rs        countdown.cooperlees.com JSON API client + typed structs
 src/asn.rs              client subnet -> ASN + org name (Prometheus check,
                         then Cymru DNS fallback), off the request path
 src/logging.rs          tracing subscriber setup: glog-on-stderr always,
-                        optional OTLP export to Jaeger
+                        optional OTLP export (Tempo in the real deployment)
 src/rate_limit.rs       per-subnet GCRA rate limiting + IP/CIDR allowlist
 ```
 
