@@ -14,6 +14,14 @@ COPY src ./src
 RUN touch src/main.rs && cargo build --release
 
 FROM debian:bookworm-slim AS runtime
+# Baked in by docker.yml (GIT_SHA=${{ github.sha }}, a UTC build timestamp) -
+# "unknown" for any image built without them (local `docker build .`). Read
+# at startup by main.rs's root-route banner; not meaningful to the app
+# otherwise, so plain ENV rather than threaded through Config::from_env.
+ARG GIT_SHA=unknown
+ARG BUILD_DATE=unknown
+ENV GIT_SHA=${GIT_SHA}
+ENV BUILD_DATE=${BUILD_DATE}
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/* \

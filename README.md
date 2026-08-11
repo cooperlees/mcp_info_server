@@ -64,7 +64,7 @@ curl https://mcp.cooperlees.com/mcp \
 
 | Route | Description |
 |---|---|
-| `GET /` | ASCII-art landing page listing available routes/tools |
+| `GET /` | ASCII-art landing page listing available routes/tools, plus the running build's version, short git commit, and build date (baked into the Docker image at build time — `"unknown"` for a local `cargo run`) |
 | `GET /coopers-resume` (alias: `GET /resume`) | The same rendered resume `get_resume` returns, as `text/markdown` — no MCP client needed |
 | `GET /healthz` | Liveness check, always `200`, body `Ok` |
 | `GET /metrics` | Prometheus metrics (see [Metrics](#metrics)) |

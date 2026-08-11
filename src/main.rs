@@ -453,6 +453,8 @@ const BANNER: &str = r#"
   over IPv6 wherever possible, no auth required -- the content was
   already public. G'day from 🇦🇺.
 
+  Build: v{version} ({git_sha}, {build_date})
+
   Routes:
     POST /mcp             MCP tools: list_posts, get_post, list_pages,
                            get_page, get_resume, list_countdowns,
@@ -465,7 +467,21 @@ const BANNER: &str = r#"
   https://github.com/cooperlees/mcp_info_server
 "#;
 
-async fn root() -> (axum::http::HeaderMap, &'static str) {
+/// Fills in `BANNER`'s `{version}`/`{git_sha}`/`{build_date}` placeholders.
+/// `GIT_SHA`/`BUILD_DATE` are baked into the Docker image at build time by
+/// `.github/workflows/docker.yml` (see the Dockerfile) — `"unknown"` for any
+/// run that isn't that image (local `cargo run`, a bare `docker build .`).
+fn banner() -> String {
+    let git_sha = std::env::var("GIT_SHA").unwrap_or_else(|_| "unknown".to_owned());
+    let git_sha = git_sha.get(..7).unwrap_or(&git_sha);
+    let build_date = std::env::var("BUILD_DATE").unwrap_or_else(|_| "unknown".to_owned());
+    BANNER
+        .replace("{version}", env!("CARGO_PKG_VERSION"))
+        .replace("{git_sha}", git_sha)
+        .replace("{build_date}", &build_date)
+}
+
+async fn root() -> (axum::http::HeaderMap, String) {
     let mut headers = axum::http::HeaderMap::new();
     headers.insert(
         axum::http::header::CONTENT_TYPE,
@@ -473,7 +489,7 @@ async fn root() -> (axum::http::HeaderMap, &'static str) {
             .parse()
             .expect("valid header value"),
     );
-    (headers, BANNER)
+    (headers, banner())
 }
 
 async fn healthz() -> (StatusCode, &'static str) {
@@ -507,6 +523,19 @@ async fn shutdown_signal() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn banner_fills_in_every_placeholder() {
+        let output = banner();
+        assert!(
+            !output.contains('{'),
+            "banner left an unfilled {{version}}/{{git_sha}}/{{build_date}} placeholder: {output}"
+        );
+        assert!(
+            output.contains(&format!("Build: v{}", env!("CARGO_PKG_VERSION"))),
+            "banner missing the version line: {output}"
+        );
+    }
 
     #[test]
     fn client_subnet_masks_ipv4_to_slash24() {
