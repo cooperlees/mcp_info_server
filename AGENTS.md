@@ -27,6 +27,9 @@ cargo run                                               # Run locally on :6969
 docker build -t mcp_info_server:latest .
 docker run --rm -p 6969:6969 mcp_info_server:latest
 npx @modelcontextprotocol/inspector http://localhost:6969/mcp   # Interactive MCP debugger
+npx @modelcontextprotocol/inspector --cli http://localhost:6969/mcp \
+  --method tools/list                                    # Non-interactive - same command CI runs
+                                                          # against the release binary, see below
 
 # Release regression gate — wire-level MCP protocol/security checks `cargo test`'s unit
 # tests can't catch (they exercise Rust internals, not the actual JSON-RPC/HTTP contract
@@ -37,8 +40,14 @@ MCP_SMOKE_TEST_URL=https://mcp.cooperlees.com \
   cargo test --test protocol_smoke                      # Post-release: checks the live deployment instead
 ```
 
-All four CI checks (fmt, clippy, test, release build) must pass locally before pushing — this
-mirrors `.github/workflows/ci.yml` and `clippy.yml` exactly, so a clean local run means CI will pass.
+All four `cargo` checks (fmt, clippy, test, release build) must pass locally before pushing — this
+mirrors `.github/workflows/ci.yml` and `clippy.yml` exactly, so a clean local run means CI will
+pass. `ci.yml` also runs that `--cli --method tools/list` Inspector command above against the
+just-built release binary and fails if any of the seven tools are missing — an independent client
+implementation actually driving this server, not just `protocol_smoke`'s own `reqwest` harness. If
+it passes locally against `cargo run`, it'll pass there too — this is reproducibility by
+construction, not by coincidence: don't let the CI step and the documented local command drift
+apart.
 
 ## Keep the root-route ASCII banner in sync
 
