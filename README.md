@@ -32,6 +32,34 @@ Point any Streamable HTTP-capable MCP client at `https://mcp.cooperlees.com/mcp`
 [Connecting an LLM TUI](#connecting-an-llm-tui) below for the exact command
 per client).
 
+**Protocol versions:** this server negotiates anything from `2024-11-05` up to
+the current latest, `2026-07-28`. Clients on `2025-06-18`/`2025-11-25` (today's
+Claude Code/Desktop, Codex CLI, Gemini CLI, etc.) get the familiar
+`initialize` handshake and an `Mcp-Session-Id` to carry on subsequent calls —
+unchanged. Clients on `2026-07-28` — the version [SEP-2567](https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2567)
+removed sessions from entirely — are instead served fully statelessly: no
+handshake, no session ID, every request self-contained via `params._meta`,
+plain `application/json` replies (not SSE) for these single-response tools.
+A minimal example of the latter, calling `tools/list` cold with no prior
+request:
+
+```bash
+curl https://mcp.cooperlees.com/mcp \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -H 'MCP-Protocol-Version: 2026-07-28' \
+  -H 'Mcp-Method: tools/list' \
+  -d '{
+        "jsonrpc": "2.0", "id": 1, "method": "tools/list",
+        "params": {
+          "_meta": {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities": {}
+          }
+        }
+      }'
+```
+
 ### Plain HTTP routes
 
 | Route | Description |
@@ -315,4 +343,10 @@ src/rate_limit.rs       per-subnet GCRA rate limiting + IP/CIDR allowlist
 Built with [`rmcp`](https://github.com/modelcontextprotocol/rust-sdk) (the
 official Rust MCP SDK) via its `StreamableHttpService`, mounted into a
 normal [`axum`](https://github.com/tokio-rs/axum) router alongside the plain
-HTTP routes — one binary, one port, one `axum::serve` call.
+HTTP routes — one binary, one port, one `axum::serve` call. `rmcp` handles
+both session-based (legacy) and fully stateless (2026-07-28+, per-request)
+MCP requests on that same `/mcp` route automatically, based on what each
+request negotiates; `json_response` is turned on in `main.rs` so the
+stateless path replies with plain JSON instead of an SSE envelope for these
+single-response tools — see [Protocol versions](#mcp-tools-post-mcp-streamable-http-transport)
+above.

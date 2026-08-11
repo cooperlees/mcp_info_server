@@ -240,6 +240,77 @@ async fn tools_list_exposes_exactly_the_seven_documented_tools_with_valid_schema
     }
 }
 
+/// MCP 2026-07-28 (SEP-2567/SEP-2575, the current latest spec) removes
+/// protocol-level sessions and the `initialize` handshake entirely: every
+/// request is self-describing via `params._meta`, so a client never sends
+/// (and never receives) an `Mcp-Session-Id`. `rmcp` serves any request that
+/// negotiates this version through its stateless code path regardless of
+/// this server's `legacy_session_mode` setting - this is the regression gate
+/// for that path and for `json_response` (config.rs `with_json_response`,
+/// wired in `main.rs`), which is what keeps the reply a plain JSON body
+/// instead of an SSE envelope.
+#[tokio::test]
+async fn stateless_2026_07_28_request_needs_no_session_and_returns_plain_json() {
+    let (base_url, _guard) = target().await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("{base_url}/mcp"))
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json, text/event-stream")
+        .header("MCP-Protocol-Version", "2026-07-28")
+        .header("Mcp-Method", "tools/list")
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list",
+            "params": {
+                "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                    "io.modelcontextprotocol/clientCapabilities": {}
+                }
+            }
+        }))
+        .send()
+        .await
+        .expect("stateless tools/list request failed");
+
+    assert!(
+        resp.status().is_success(),
+        "stateless tools/list returned {}",
+        resp.status()
+    );
+    assert!(
+        resp.headers().get("mcp-session-id").is_none(),
+        "a stateless 2026-07-28 request must not get an Mcp-Session-Id - sessions were removed by SEP-2567"
+    );
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .expect("missing Content-Type")
+        .to_str()
+        .expect("Content-Type not valid ASCII")
+        .to_owned();
+    assert!(
+        content_type.starts_with("application/json"),
+        "expected a plain JSON reply (json_response=true), got Content-Type: {content_type}"
+    );
+
+    let response: Value = resp.json().await.expect("reading tools/list body as JSON");
+    let tools = response["result"]["tools"]
+        .as_array()
+        .unwrap_or_else(|| panic!("tools/list result.tools should be an array: {response}"));
+    let names: HashSet<&str> = tools
+        .iter()
+        .map(|t| t["name"].as_str().expect("tool missing name"))
+        .collect();
+    let expected: HashSet<&str> = EXPECTED_TOOLS.iter().copied().collect();
+    assert_eq!(
+        names, expected,
+        "stateless tools/list returned a different tool set than the session-based path"
+    );
+}
+
 #[tokio::test]
 async fn requests_from_an_unrecognized_host_are_rejected() {
     let (base_url, _guard) = target().await;
