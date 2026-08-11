@@ -27,6 +27,17 @@ cargo run                                               # Run locally on :6969
 docker build -t mcp_info_server:latest .
 docker run --rm -p 6969:6969 mcp_info_server:latest
 npx @modelcontextprotocol/inspector http://localhost:6969/mcp   # Interactive MCP debugger
+npx @modelcontextprotocol/inspector --cli http://localhost:6969/mcp \
+  --method tools/list                                    # Non-interactive, stateful/session-based -
+                                                          # same command CI runs, see below
+curl http://localhost:6969/mcp \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -H 'MCP-Protocol-Version: 2026-07-28' \
+  -H 'Mcp-Method: tools/list' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}'
+                                                          # The 2026-07-28 stateless path (SEP-2567) -
+                                                          # no initialize, no session; CI runs this too
 
 # Release regression gate — wire-level MCP protocol/security checks `cargo test`'s unit
 # tests can't catch (they exercise Rust internals, not the actual JSON-RPC/HTTP contract
@@ -37,8 +48,17 @@ MCP_SMOKE_TEST_URL=https://mcp.cooperlees.com \
   cargo test --test protocol_smoke                      # Post-release: checks the live deployment instead
 ```
 
-All four CI checks (fmt, clippy, test, release build) must pass locally before pushing — this
-mirrors `.github/workflows/ci.yml` and `clippy.yml` exactly, so a clean local run means CI will pass.
+All four `cargo` checks (fmt, clippy, test, release build) must pass locally before pushing — this
+mirrors `.github/workflows/ci.yml` and `clippy.yml` exactly, so a clean local run means CI will
+pass. `ci.yml` also runs both commands above against the just-built release binary and fails if
+either is missing any of the seven tools: the Inspector CLI (stateful, session-based — this
+server's most common real-world path) and the raw `curl` (stateless, 2026-07-28, no session — see
+`with_json_response(true)` in `main.rs`). Together they cover both transport modes this server
+supports, each with an independent client implementation actually driving it, not just
+`protocol_smoke`'s own `reqwest` harness. If both pass locally against `cargo run`, they'll pass in
+CI too — this is reproducibility by construction, not by coincidence: don't let the CI steps and
+the documented local commands drift apart, and if a third mode is ever added, check it both places
+too.
 
 ## Keep the root-route ASCII banner in sync
 

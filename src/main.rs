@@ -163,7 +163,17 @@ async fn main() -> Result<(), AppError> {
     let mcp_service = StreamableHttpService::new(
         move || Ok(InfoServer::new(mcp_state.clone())),
         Arc::new(LocalSessionManager::default()),
-        StreamableHttpServerConfig::default().with_allowed_hosts(config.allowed_hosts.clone()),
+        StreamableHttpServerConfig::default()
+            .with_allowed_hosts(config.allowed_hosts.clone())
+            // Only affects requests that already skip session mode - i.e. any
+            // client negotiating MCP 2026-07-28+ (SEP-2567 removed sessions
+            // entirely; rmcp serves those requests statelessly regardless of
+            // `legacy_session_mode`, which stays default-on below for older
+            // clients still doing the initialize/Mcp-Session-Id handshake).
+            // Without this, even a stateless request gets its single JSON
+            // reply wrapped in an SSE envelope - not useful for a plain HTTP
+            // client that just wants a JSON response back.
+            .with_json_response(true),
     );
 
     let app = Router::new()
