@@ -37,7 +37,7 @@ the current latest, `2026-07-28`. Clients on `2025-06-18`/`2025-11-25` (today's
 Claude Code/Desktop, Codex CLI, Gemini CLI, etc.) get the familiar
 `initialize` handshake and an `Mcp-Session-Id` to carry on subsequent calls —
 unchanged. Clients on `2026-07-28` — the version [SEP-2567](https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2567)
-removed sessions from entirely — are instead served fully statelessly: no
+removed sessions entirely — are instead served fully statelessly: no
 handshake, no session ID, every request self-contained via `params._meta`,
 plain `application/json` replies (not SSE) for these single-response tools.
 A minimal example of the latter, calling `tools/list` cold with no prior
