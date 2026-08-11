@@ -31,3 +31,35 @@ jobs:
         run: |
           ls -lh target/debug/ || true
           ls -lh target/release/
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
+      - name: Start the release build for a live MCP client check
+        run: |
+          RUST_LOG=info LISTEN_PORT=6969 ./target/release/mcp_info_server &
+          echo $! > server.pid
+          for _ in $(seq 1 20); do
+            curl -sf http://127.0.0.1:6969/healthz && exit 0
+            sleep 0.5
+          done
+          echo "server never became healthy" >&2
+          exit 1
+
+      - name: Hit it with a real MCP client (Inspector CLI)
+        # protocol_smoke.rs (run above by `cargo test`) already checks the
+        # wire contract with our own reqwest client - this instead proves an
+        # independent, official client implementation can actually drive
+        # this server, the same way a real user's LLM TUI would.
+        run: |
+          npx --yes @modelcontextprotocol/inspector --cli http://127.0.0.1:6969/mcp \
+            --method tools/list > tools_list.json
+          cat tools_list.json
+          for tool in list_posts get_post list_pages get_page get_resume list_countdowns get_countdown; do
+            grep -q "\"$tool\"" tools_list.json || { echo "Inspector CLI's tools/list is missing '$tool'"; exit 1; }
+          done
+
+      - name: Stop server
+        if: always()
+        run: kill "$(cat server.pid)" 2>/dev/null || true
