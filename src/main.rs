@@ -471,7 +471,7 @@ const BANNER: &str = r#"
 /// `GIT_SHA`/`BUILD_DATE` are baked into the Docker image at build time by
 /// `.github/workflows/docker.yml` (see the Dockerfile) — `"unknown"` for any
 /// run that isn't that image (local `cargo run`, a bare `docker build .`).
-fn banner() -> String {
+fn render_banner() -> String {
     let git_sha = std::env::var("GIT_SHA").unwrap_or_else(|_| "unknown".to_owned());
     let git_sha = git_sha.get(..7).unwrap_or(&git_sha);
     let build_date = std::env::var("BUILD_DATE").unwrap_or_else(|_| "unknown".to_owned());
@@ -481,7 +481,12 @@ fn banner() -> String {
         .replace("{build_date}", &build_date)
 }
 
-async fn root() -> (axum::http::HeaderMap, String) {
+// GIT_SHA/BUILD_DATE never change for the life of the process, so there's no
+// reason to re-read the env and re-allocate this string on every GET / -
+// computed once, lazily, on first access.
+static RENDERED_BANNER: std::sync::LazyLock<String> = std::sync::LazyLock::new(render_banner);
+
+async fn root() -> (axum::http::HeaderMap, &'static str) {
     let mut headers = axum::http::HeaderMap::new();
     headers.insert(
         axum::http::header::CONTENT_TYPE,
@@ -489,7 +494,7 @@ async fn root() -> (axum::http::HeaderMap, String) {
             .parse()
             .expect("valid header value"),
     );
-    (headers, banner())
+    (headers, RENDERED_BANNER.as_str())
 }
 
 async fn healthz() -> (StatusCode, &'static str) {
@@ -526,7 +531,7 @@ mod tests {
 
     #[test]
     fn banner_fills_in_every_placeholder() {
-        let output = banner();
+        let output = render_banner();
         assert!(
             !output.contains('{'),
             "banner left an unfilled {{version}}/{{git_sha}}/{{build_date}} placeholder: {output}"
