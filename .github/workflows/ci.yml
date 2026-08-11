@@ -18,6 +18,23 @@ jobs:
           components: rustfmt
       - uses: Swatinem/rust-cache@v2
 
+      - name: Check Cargo.toml version is today's date (CalVer YY.M.D)
+        # See AGENTS.md: [package].version tracks the UTC date of the most
+        # recent change, bumped on every commit (human or AI) - not a
+        # per-release counter. Multiple same-day commits keep the same
+        # version; exact same-day builds are already disambiguated by the
+        # git commit + build timestamp shown on the root route (main.rs's
+        # `banner()`), so there's no need for this to be unique per commit,
+        # only accurate as of today.
+        run: |
+          expected="$(date -u +%y.%-m.%-d)"
+          actual="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')"
+          if [ "$actual" != "$expected" ]; then
+            echo "Cargo.toml version ($actual) doesn't match today's UTC date ($expected)." >&2
+            echo "Bump [package].version in Cargo.toml to \"$expected\"." >&2
+            exit 1
+          fi
+
       - name: Cargo format
         run: cargo fmt --check
 
