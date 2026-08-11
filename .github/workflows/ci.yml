@@ -47,17 +47,49 @@ jobs:
           echo "server never became healthy" >&2
           exit 1
 
-      - name: Hit it with a real MCP client (Inspector CLI)
+      - name: Hit it with a real MCP client (Inspector CLI, stateful/session-based)
         # protocol_smoke.rs (run above by `cargo test`) already checks the
         # wire contract with our own reqwest client - this instead proves an
         # independent, official client implementation can actually drive
-        # this server, the same way a real user's LLM TUI would.
+        # this server, the same way a real user's LLM TUI would. The
+        # Inspector CLI does the classic initialize -> Mcp-Session-Id ->
+        # tools/list handshake (confirmed against this server's own debug
+        # logs), so this exercises the legacy_session_mode path specifically
+        # - see the next step for the 2026-07-28 stateless path.
         run: |
           npx --yes @modelcontextprotocol/inspector --cli http://127.0.0.1:6969/mcp \
             --method tools/list > tools_list.json
           cat tools_list.json
           for tool in list_posts get_post list_pages get_page get_resume list_countdowns get_countdown; do
             grep -q "\"$tool\"" tools_list.json || { echo "Inspector CLI's tools/list is missing '$tool'"; exit 1; }
+          done
+
+      - name: Hit it statelessly too (2026-07-28, no initialize/session)
+        # The MCP Inspector CLI above only speaks the legacy session-based
+        # handshake, so it can't exercise the 2026-07-28 stateless path
+        # (SEP-2567) this server also supports - check that directly against
+        # the same live release binary: a bare, self-describing tools/list
+        # request with no prior initialize call, same shape as the
+        # protocol_smoke regression test and the README example.
+        run: |
+          curl -sf -D headers.txt http://127.0.0.1:6969/mcp \
+            -H 'Content-Type: application/json' \
+            -H 'Accept: application/json, text/event-stream' \
+            -H 'MCP-Protocol-Version: 2026-07-28' \
+            -H 'Mcp-Method: tools/list' \
+            -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}' \
+            -o stateless_tools_list.json
+          cat headers.txt
+          cat stateless_tools_list.json
+          grep -qi '^content-type: application/json' headers.txt || {
+            echo "expected a plain JSON reply (json_response=true), not SSE"; exit 1;
+          }
+          if grep -qi '^mcp-session-id:' headers.txt; then
+            echo "a stateless 2026-07-28 request must not get an Mcp-Session-Id - sessions were removed by SEP-2567"
+            exit 1
+          fi
+          for tool in list_posts get_post list_pages get_page get_resume list_countdowns get_countdown; do
+            grep -q "\"$tool\"" stateless_tools_list.json || { echo "stateless tools/list is missing '$tool'"; exit 1; }
           done
 
       - name: Stop server
