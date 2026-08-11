@@ -112,3 +112,11 @@ src/countdown.rs         countdown.cooperlees.com JSON API client + typed struct
   required config for local dev.
 - Always move to the latest stable Rust language edition / toolchain features when they're stable;
   don't hold back for compatibility this project doesn't need.
+- `[package].version` in `Cargo.toml` is CalVer, `YY.M.D` (UTC, no leading zeros — e.g. `26.8.11`
+  for 2026-08-11), not semver-for-a-library versioning. **Bump it to today's date in every commit**
+  (human or AI) that changes it from what's already there — `ci.yml` enforces this by failing if
+  the version doesn't equal today's UTC date, so a stale version fails CI, not just review. Multiple
+  commits on the same day keep the same version; that's expected, not a bug — exact same-day builds
+  are already disambiguated by the git commit + build timestamp `main.rs`'s root-route `banner()`
+  shows (baked in from `GIT_SHA`/`BUILD_DATE`, see the Dockerfile), so the version field only needs
+  to track *which day*, never a unique-per-commit counter.
