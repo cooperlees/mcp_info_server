@@ -370,6 +370,75 @@ async fn requests_after_initialize_are_rejected_without_a_session_id() {
     );
 }
 
+/// `GET /` content-negotiates: the plain-text banner for everything that
+/// doesn't ask for HTML (curl, MCP clients, `Accept: */*`), the linkified
+/// rendering only for clients that do (browsers). Unit tests cover the HTML
+/// itself; this covers the wire contract - status, `Content-Type`, `Vary`.
+#[tokio::test]
+async fn root_serves_text_by_default_and_html_on_request() {
+    let (base_url, _guard) = target().await;
+    let client = reqwest::Client::new();
+
+    let text = client
+        .get(format!("{base_url}/"))
+        .send()
+        .await
+        .expect("GET / failed");
+    assert!(
+        text.status().is_success(),
+        "GET / returned {}",
+        text.status()
+    );
+    let content_type = header(&text, "content-type");
+    assert!(
+        content_type.starts_with("text/plain"),
+        "GET / with no Accept should stay text/plain, got {content_type}"
+    );
+    assert!(
+        header(&text, "vary")
+            .to_ascii_lowercase()
+            .contains("accept"),
+        "GET / must Vary on Accept - two bodies share the URL"
+    );
+    let body = text.text().await.expect("GET / body");
+    assert!(
+        !body.contains("<a href="),
+        "the plain-text banner grew HTML markup: {body}"
+    );
+
+    let html = client
+        .get(format!("{base_url}/"))
+        .header("Accept", "text/html,application/xhtml+xml,*/*;q=0.8")
+        .send()
+        .await
+        .expect("GET / (Accept: text/html) failed");
+    assert!(
+        html.status().is_success(),
+        "GET / (Accept: text/html) returned {}",
+        html.status()
+    );
+    let content_type = header(&html, "content-type");
+    assert!(
+        content_type.starts_with("text/html"),
+        "a browser's Accept should get text/html, got {content_type}"
+    );
+    let body = html.text().await.expect("GET / (html) body");
+    assert!(
+        body.contains(r#"<a href="https://github.com/cooperlees/mcp_info_server">"#),
+        "the HTML banner is missing the GitHub hyperlink: {body}"
+    );
+}
+
+/// A response header as a `String`, or `""` if absent/non-ASCII.
+fn header(response: &reqwest::Response, name: &str) -> String {
+    response
+        .headers()
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_owned()
+}
+
 #[tokio::test]
 async fn plain_http_routes_still_respond() {
     // Deliberately excludes /coopers-resume and /resume - those hit the real
