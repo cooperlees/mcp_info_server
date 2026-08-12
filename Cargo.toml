@@ -1,6 +1,6 @@
 [package]
 name = "mcp_info_server"
-version = "26.8.11"
+version = "26.8.12"
 edition = "2024"
 authors = ["Cooper Ry Lees <me@cooperlees.com>"]
 license = "GPL-2.0-or-later"

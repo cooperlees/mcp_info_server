@@ -69,6 +69,12 @@ existing tone: the terse "MCP" figlet header, a one-line Cooper-Lees-flavored in
 public/no-auth), then a plain `Routes:` list — no extra decorative ASCII beyond the header, it reads
 better plain.
 
+`GET /` serves that banner two ways off the one `BANNER` const: `text/plain` for everything that
+doesn't ask for HTML (curl, MCP clients), and an HTML rendering — the same text in a `<pre>`, with
+links clickable — for clients sending `Accept: text/html`. **Plain text stays the default**; don't
+flip that around. When a new browser-reachable route lands in `BANNER`, add it to `BANNER_LINKS`
+next to it so it's clickable too (`POST /mcp` is deliberately not in there — a link is a GET).
+
 ## Keep new tools/routes instrumented
 
 Every MCP tool call and every HTTP route already gets metrics for free — a new tool added inside

@@ -440,6 +440,8 @@ async fn metrics_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 
+const GITHUB_URL: &str = "https://github.com/cooperlees/mcp_info_server";
+
 const BANNER: &str = r#"
  __  __  ____ ____
 |  \/  |/ ___|  _ \
@@ -481,20 +483,119 @@ fn render_banner() -> String {
         .replace("{build_date}", &build_date)
 }
 
+/// Text in `BANNER` worth making clickable in the HTML rendering, and where
+/// each bit points. Ordered longest-first and matched in a single left-to-
+/// right pass, so an `<a>` this inserts can never be rewritten by a later
+/// entry (`/coopers-resume` has to win over `/resume`). `POST /mcp` is
+/// deliberately absent - a browser following a link would GET it, which isn't
+/// what that endpoint does. **Add an entry whenever a new browser-reachable
+/// route lands in `BANNER`.**
+const BANNER_LINKS: &[(&str, &str)] = &[
+    (GITHUB_URL, GITHUB_URL),
+    ("/coopers-resume", "/coopers-resume"),
+    ("cooperlees.com", "https://cooperlees.com"),
+    ("/healthz", "/healthz"),
+    ("/metrics", "/metrics"),
+    ("/resume", "/resume"),
+];
+
+/// Minimal HTML escaping. The banner is a compile-time constant plus three
+/// env-derived values (`GIT_SHA`/`BUILD_DATE`/`CARGO_PKG_VERSION`), and all of
+/// it lands in text content, never in an attribute - so the three characters
+/// that can open a tag or an entity are the whole job here.
+fn html_escape(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+/// Wraps every `BANNER_LINKS` needle found in `escaped` in an anchor.
+fn linkify(escaped: &str) -> String {
+    let mut out = String::with_capacity(escaped.len() * 2);
+    let mut rest = escaped;
+    'scan: while !rest.is_empty() {
+        for (text, href) in BANNER_LINKS {
+            if let Some(remainder) = rest.strip_prefix(text) {
+                out.push_str("<a href=\"");
+                out.push_str(href);
+                out.push_str("\">");
+                out.push_str(text);
+                out.push_str("</a>");
+                rest = remainder;
+                continue 'scan;
+            }
+        }
+        let c = rest.chars().next().expect("rest is non-empty");
+        out.push(c);
+        rest = &rest[c.len_utf8()..];
+    }
+    out
+}
+
+/// The same banner a terminal gets, in the least HTML that makes its links
+/// clickable: a `<pre>` (it's ASCII art - the layout *is* the content) and a
+/// `color-scheme` that lets the browser pick readable defaults in either
+/// theme. `BANNER` stays the single source of truth for both renderings.
+fn render_banner_html() -> String {
+    let body = linkify(&html_escape(&render_banner()));
+    format!(
+        r#"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mcp_info_server</title>
+<style>
+:root {{ color-scheme: light dark; }}
+body {{ margin: 0; padding: 1.5rem; }}
+pre {{ font-size: 0.95rem; line-height: 1.35; overflow-x: auto; }}
+</style>
+</head>
+<body>
+<pre>{body}</pre>
+</body>
+</html>
+"#
+    )
+}
+
 // GIT_SHA/BUILD_DATE never change for the life of the process, so there's no
-// reason to re-read the env and re-allocate this string on every GET / -
+// reason to re-read the env and re-allocate these strings on every GET / -
 // computed once, lazily, on first access.
 static RENDERED_BANNER: std::sync::LazyLock<String> = std::sync::LazyLock::new(render_banner);
+static RENDERED_BANNER_HTML: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(render_banner_html);
 
-async fn root() -> (axum::http::HeaderMap, &'static str) {
-    let mut headers = axum::http::HeaderMap::new();
-    headers.insert(
+/// Plain text by default - curl, MCP clients and anything else sending
+/// `Accept: */*` get exactly the banner they always have. Only a client that
+/// explicitly asks for `text/html` (browsers do; terminals don't) gets the
+/// rendering with real links.
+async fn root(headers: HeaderMap) -> (HeaderMap, &'static str) {
+    let wants_html = headers
+        .get(axum::http::header::ACCEPT)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|accept| accept.contains("text/html"));
+    let (content_type, body) = if wants_html {
+        ("text/html; charset=utf-8", RENDERED_BANNER_HTML.as_str())
+    } else {
+        ("text/plain; charset=utf-8", RENDERED_BANNER.as_str())
+    };
+
+    let mut response_headers = HeaderMap::new();
+    response_headers.insert(
         axum::http::header::CONTENT_TYPE,
-        "text/plain; charset=utf-8"
+        content_type.parse().expect("valid header value"),
+    );
+    // Two bodies behind one URL - say so, or a cache hands a browser the
+    // text version (or a terminal the HTML one).
+    response_headers.insert(
+        axum::http::header::VARY,
+        axum::http::header::ACCEPT
+            .as_str()
             .parse()
             .expect("valid header value"),
     );
-    (headers, RENDERED_BANNER.as_str())
+    (response_headers, body)
 }
 
 async fn healthz() -> (StatusCode, &'static str) {
@@ -539,6 +640,88 @@ mod tests {
         assert!(
             output.contains(&format!("Build: v{}", env!("CARGO_PKG_VERSION"))),
             "banner missing the version line: {output}"
+        );
+    }
+
+    #[test]
+    fn banner_links_all_appear_in_the_banner() {
+        // A needle that no longer matches the banner is a link silently gone
+        // missing from the HTML rendering - `GET /` would still look fine.
+        for (text, _) in BANNER_LINKS {
+            assert!(
+                BANNER.contains(text),
+                "BANNER_LINKS entry {text:?} is no longer in BANNER"
+            );
+        }
+    }
+
+    #[test]
+    fn banner_links_are_ordered_longest_first() {
+        // `linkify` takes the first entry that matches at a position, so a
+        // shorter needle listed ahead of a longer one it prefixes would win
+        // and truncate the link (`/resume` swallowing `/coopers-resume`).
+        assert!(
+            BANNER_LINKS
+                .windows(2)
+                .all(|w| w[0].0.len() >= w[1].0.len()),
+            "BANNER_LINKS must stay ordered longest-needle-first"
+        );
+    }
+
+    #[test]
+    fn banner_html_hyperlinks_github_and_the_get_routes() {
+        let html = render_banner_html();
+        for (text, href) in BANNER_LINKS {
+            assert!(
+                html.contains(&format!("<a href=\"{href}\">{text}</a>")),
+                "banner HTML is missing a link to {href}: {html}"
+            );
+        }
+    }
+
+    #[test]
+    fn banner_html_leaves_post_mcp_unlinked() {
+        // A browser following a link GETs it; /mcp only answers POST.
+        let html = render_banner_html();
+        assert!(
+            html.contains("POST /mcp  "),
+            "banner HTML lost the POST /mcp line: {html}"
+        );
+        assert!(
+            !html.contains("href=\"/mcp\""),
+            "banner HTML linked POST /mcp, which a browser can't follow: {html}"
+        );
+    }
+
+    #[test]
+    fn banner_html_keeps_the_build_line() {
+        assert!(
+            render_banner_html().contains(&format!("Build: v{}", env!("CARGO_PKG_VERSION"))),
+            "banner HTML dropped the version line"
+        );
+    }
+
+    #[test]
+    fn html_escape_neutralizes_markup() {
+        assert_eq!(
+            html_escape(r#"<script>a && b</script>"#),
+            "&lt;script&gt;a &amp;&amp; b&lt;/script&gt;"
+        );
+    }
+
+    #[test]
+    fn linkify_does_not_nest_anchors_in_inserted_markup() {
+        // The href of one link containing another needle is the trap here -
+        // a single left-to-right pass is what makes it impossible.
+        let html = render_banner_html();
+        assert!(
+            !html.contains("<a href=\"<a"),
+            "linkify rewrote its own markup: {html}"
+        );
+        assert_eq!(
+            html.matches("<a href=").count(),
+            html.matches("</a>").count(),
+            "unbalanced anchors: {html}"
         );
     }
 
