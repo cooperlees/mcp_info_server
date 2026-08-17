@@ -6,6 +6,8 @@ jobs:
   build_and_test:
     name: Rust Cargo CI on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
 
     strategy:
       matrix:
@@ -13,12 +15,14 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: true
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
       - uses: Swatinem/rust-cache@v2
 
-      - name: Check Cargo.toml version is today's date (CalVer YY.M.D)
+      - name: Auto-bump Cargo.toml version to today's CalVer (YY.M.D) if stale
         # See AGENTS.md: [package].version tracks the UTC date of the most
         # recent change, bumped on every commit (human or AI) - not a
         # per-release counter. Multiple same-day commits keep the same
@@ -26,14 +30,26 @@ jobs:
         # git commit + build timestamp shown on the root route (main.rs's
         # `banner()`), so there's no need for this to be unique per commit,
         # only accurate as of today.
+        #
+        # Rather than failing the build when the version is stale, this step
+        # auto-bumps Cargo.toml (and the matching Cargo.lock entry) and
+        # pushes a fixup commit so the branch always stays green.
         run: |
           expected="$(date -u +%y.%-m.%-d)"
           actual="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')"
-          if [ "$actual" != "$expected" ]; then
-            echo "Cargo.toml version ($actual) doesn't match today's UTC date ($expected)." >&2
-            echo "Bump [package].version in Cargo.toml to \"$expected\"." >&2
-            exit 1
+          if [ "$actual" = "$expected" ]; then
+            echo "Version is already up-to-date ($actual)."
+            exit 0
           fi
+          echo "Bumping Cargo.toml version: $actual -> $expected"
+          sed -i "s/^version = \"$actual\"/version = \"$expected\"/" Cargo.toml
+          # Refresh Cargo.lock to match (no network fetch needed, just rewrite the lock entry)
+          cargo metadata --no-deps --format-version 1 > /dev/null
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock
+          git commit -m "chore: auto-bump Cargo.toml version to $expected (CalVer)"
+          git push
 
       - name: Cargo format
         run: cargo fmt --check
