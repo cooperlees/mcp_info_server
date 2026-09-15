@@ -59,10 +59,18 @@ jobs:
           # stanza appears exactly once, so rewrite just its version line -
           # deterministic, offline, zero dependency drift - then assert it.
           sed -i '/^name = "mcp_info_server"$/,/^version = / s/^version = ".*"/version = "'"$expected"'"/' Cargo.lock
-          grep -A1 '^name = "mcp_info_server"$' Cargo.lock | grep -q "version = \"$expected\"" || \{
+          # NOTE: keep this as if/else, not `grep -q ... || { ...; }` -
+          # the || form spuriously takes the failure branch on the
+          # ubuntu-latest runner even when the grep matches (proven over
+          # three E2E runs on PR #29: staged exit codes showed the
+          # identical grep exiting 0, yet || still fired). The if form
+          # behaves correctly on the same runner.
+          if grep -A1 '^name = "mcp_info_server"$' Cargo.lock | grep -q "version = \"$expected\""; then
+            echo "Cargo.lock root entry updated to $expected."
+          else
             echo "Cargo.lock root entry did not update to $expected" >&2
             exit 1
-          \}
+          fi
           # Fork PRs check out fine but can't be pushed back with
           # GITHUB_TOKEN (scoped to the base repo) - skip the fixup there
           # rather than failing the whole job; the author can bump locally.
