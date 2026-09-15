@@ -17,6 +17,13 @@ jobs:
       - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: true
+          # On pull_request events checkout defaults to a detached merge
+          # commit, from which `git push` below fails with exit 128
+          # ("You are not currently on a branch"). Checking out the head
+          # ref instead puts the runner on the real branch so the fixup
+          # commit can be pushed back. Falls back to the push-event branch
+          # name when head_ref is empty (i.e. not a PR run).
+          ref: ${{ github.head_ref || github.ref_name }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -43,8 +50,19 @@ jobs:
           fi
           echo "Bumping Cargo.toml version: $actual -> $expected"
           sed -i "s/^version = \"$actual\"/version = \"$expected\"/" Cargo.toml
-          # Refresh Cargo.lock to match (no network fetch needed, just rewrite the lock entry)
-          cargo metadata --no-deps --format-version 1 > /dev/null
+          # Refresh the Cargo.lock root entry to match. `cargo metadata`
+          # does NOT rewrite the lockfile, so use a real (offline) resolve
+          # instead; --offline pins this to the local package set, so no
+          # network fetch and no unrelated dependency drift mid-PR.
+          cargo update --workspace --offline
+          # Fork PRs check out fine but can't be pushed back with
+          # GITHUB_TOKEN (scoped to the base repo) - skip the fixup there
+          # rather than failing the whole job; the author can bump locally.
+          if [ "${{ github.event.pull_request.head.repo.full_name }}" != "" ] && \
+             [ "${{ github.event.pull_request.head.repo.full_name }}" != "${{ github.repository }}" ]; then
+            echo "Fork PR: leaving the version bump uncommitted."
+            exit 0
+          fi
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add Cargo.toml Cargo.lock
