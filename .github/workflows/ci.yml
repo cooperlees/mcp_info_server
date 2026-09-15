@@ -50,11 +50,19 @@ jobs:
           fi
           echo "Bumping Cargo.toml version: $actual -> $expected"
           sed -i "s/^version = \"$actual\"/version = \"$expected\"/" Cargo.toml
-          # Refresh the Cargo.lock root entry to match. `cargo metadata`
-          # does NOT rewrite the lockfile, so use a real (offline) resolve
-          # instead; --offline pins this to the local package set, so no
-          # network fetch and no unrelated dependency drift mid-PR.
-          cargo update --workspace --offline
+          # Refresh the Cargo.lock root entry to match. Neither
+          # `cargo metadata` nor `cargo update -p ... --offline` can do
+          # this here: the former never writes the lockfile, and the latter
+          # needs a warm registry index, which a fresh runner doesn't have
+          # yet at this point in the job (verified: `no matching package
+          # named anyhow ... location searched: crates.io index`). The root
+          # stanza appears exactly once, so rewrite just its version line -
+          # deterministic, offline, zero dependency drift - then assert it.
+          sed -i '/^name = "mcp_info_server"$/,/^version = / s/^version = ".*"/version = "'"$expected"'"/' Cargo.lock
+          grep -A1 '^name = "mcp_info_server"$' Cargo.lock | grep -q "version = \"$expected\"" || \{
+            echo "Cargo.lock root entry did not update to $expected" >&2
+            exit 1
+          \}
           # Fork PRs check out fine but can't be pushed back with
           # GITHUB_TOKEN (scoped to the base repo) - skip the fixup there
           # rather than failing the whole job; the author can bump locally.
