@@ -42,3 +42,11 @@ tower = { version = "0.5.3", features = ["util"] }
 [profile.release]
 strip = "symbols"
 lto = "thin"
+
+# tracing-opentelemetry 0.33 on crates.io still pins opentelemetry 0.32,
+# which conflicts with the 0.33 trio above (two copies of the API crate =
+# SdkTracer no longer implements Tracer). Upstream fixed this on main
+# (tokio-rs/tracing-opentelemetry@b475aa1, 2026-09-19) but hasn't cut a
+# release; track the fix via git until 0.34 lands, then revert to crates.io.
+[patch.crates-io]
+tracing-opentelemetry = { git = "https://github.com/tokio-rs/tracing-opentelemetry", rev = "b475aa173d926b5f8bc4eecf255691a453850b4c" }
