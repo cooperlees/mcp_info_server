@@ -2,7 +2,7 @@ use std::future::Future;
 
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{Implementation, ServerCapabilities, ServerInfo};
+use rmcp::model::{Implementation, ServerCapabilities, ServerConfig};
 use rmcp::{Json, ServerHandler, tool, tool_handler, tool_router};
 use serde::Serialize;
 use tracing::Instrument;
@@ -178,12 +178,12 @@ impl InfoServer {
 
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for InfoServer {
-    fn get_info(&self) -> ServerInfo {
-        // ServerInfo::new() defaults server_info to rmcp's own Implementation
+    fn get_info(&self) -> ServerConfig {
+        // ServerConfig::new() defaults server_info to rmcp's own Implementation
         // (via Implementation::from_build_env(), which resolves env!() at
         // rmcp's compile time, not ours) - without this override, clients see
         // "connected to: rmcp 2.2.0" instead of this server's own identity.
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new(
                 env!("CARGO_PKG_NAME"),
                 env!("CARGO_PKG_VERSION"),
