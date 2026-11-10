@@ -24,6 +24,7 @@ use axum::routing::get;
 use rmcp::transport::StreamableHttpServerConfig;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::streamable_http_server::tower::StreamableHttpService;
+use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
 use crate::mcp_server::InfoServer;
@@ -159,6 +160,14 @@ async fn main() -> Result<(), AppError> {
         }
     });
 
+    // Cancelled once a shutdown signal arrives (see `shutdown_signal`), so
+    // rmcp tears down every MCP session worker and closes its open SSE
+    // streams. Without it, axum's graceful shutdown waits forever on any
+    // client holding a stateful `GET /mcp` stream open, and the process only
+    // dies when the orchestrator escalates to SIGKILL. rmcp >= 3.9.0 is
+    // needed for stateful sessions to honor this token (rust-sdk#1427).
+    let shutdown_token = CancellationToken::new();
+
     let mcp_state = state.clone();
     let mcp_service = StreamableHttpService::new(
         move || Ok(InfoServer::new(mcp_state.clone())),
@@ -173,7 +182,8 @@ async fn main() -> Result<(), AppError> {
             // Without this, even a stateless request gets its single JSON
             // reply wrapped in an SSE envelope - not useful for a plain HTTP
             // client that just wants a JSON response back.
-            .with_json_response(true),
+            .with_json_response(true)
+            .with_cancellation_token(shutdown_token.child_token()),
     );
 
     let app = Router::new()
@@ -202,7 +212,7 @@ async fn main() -> Result<(), AppError> {
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
-    .with_graceful_shutdown(shutdown_signal())
+    .with_graceful_shutdown(shutdown_signal(shutdown_token))
     .await;
 
     // Flush any spans still sitting in the batch queue before exiting,
@@ -602,7 +612,7 @@ async fn healthz() -> (StatusCode, &'static str) {
     (StatusCode::OK, "Ok")
 }
 
-async fn shutdown_signal() {
+async fn shutdown_signal(shutdown_token: CancellationToken) {
     let ctrl_c = async {
         let _ = tokio::signal::ctrl_c().await;
     };
@@ -624,6 +634,7 @@ async fn shutdown_signal() {
         _ = terminate => {}
     }
     tracing::info!("shutdown signal received");
+    shutdown_token.cancel();
 }
 
 #[cfg(test)]

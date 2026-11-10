@@ -370,6 +370,70 @@ async fn requests_after_initialize_are_rejected_without_a_session_id() {
     );
 }
 
+/// SIGTERM must still shut the server down promptly while a client holds a
+/// stateful `GET /mcp` SSE stream open. Without the shutdown
+/// `CancellationToken` wired into rmcp, axum's graceful shutdown waits on
+/// that stream forever, and every deploy ends in an orchestrator SIGKILL.
+/// Local-spawn only: never send signals to a `MCP_SMOKE_TEST_URL` target.
+#[cfg(unix)]
+#[tokio::test]
+async fn sigterm_shuts_down_promptly_with_an_open_session_stream() {
+    if std::env::var("MCP_SMOKE_TEST_URL").is_ok() {
+        return;
+    }
+    let (base_url, guard) = target().await;
+    let mut guard = guard.expect("local spawn always returns a guard");
+    let client = reqwest::Client::new();
+    let (_, session_id) = initialize(&client, &base_url, "2025-06-18").await;
+
+    let initialized = client
+        .post(format!("{base_url}/mcp"))
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json, text/event-stream")
+        .header("Mcp-Session-Id", &session_id)
+        .header("MCP-Protocol-Version", "2025-06-18")
+        .json(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"}))
+        .send()
+        .await
+        .expect("notifications/initialized request failed");
+    assert!(initialized.status().is_success());
+
+    // Held open (headers received, body never read) for the rest of the test.
+    let stream = client
+        .get(format!("{base_url}/mcp"))
+        .header("Accept", "text/event-stream")
+        .header("Mcp-Session-Id", &session_id)
+        .header("MCP-Protocol-Version", "2025-06-18")
+        .send()
+        .await
+        .expect("opening the session SSE stream failed");
+    assert!(
+        stream.status().is_success(),
+        "GET /mcp stream returned {}",
+        stream.status()
+    );
+
+    let status = Command::new("kill")
+        .args(["-TERM", &guard.0.id().to_string()])
+        .status()
+        .expect("failed to run kill");
+    assert!(status.success(), "kill -TERM failed");
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(exit) = guard.0.try_wait().expect("try_wait") {
+            assert!(exit.success(), "server exited uncleanly: {exit}");
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "server still running 5s after SIGTERM with an open session stream"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    drop(stream);
+}
+
 /// `GET /` content-negotiates: the plain-text banner for everything that
 /// doesn't ask for HTML (curl, MCP clients, `Accept: */*`), the linkified
 /// rendering only for clients that do (browsers). Unit tests cover the HTML
