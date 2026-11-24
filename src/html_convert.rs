@@ -22,7 +22,7 @@ static STYLED: LazyLock<Selector> =
 pub fn html_to_markdown(html: &str) -> Result<String, AppError> {
     let mut document = Html::parse_fragment(html);
     strip_hidden_elements(&mut document);
-    Ok(htmd::convert(&document.root_element().inner_html())?)
+    Ok(htmd::convert(document.root_element().inner_html())?)
 }
 
 /// Remove elements with an inline `display: none` style, in place.
@@ -103,6 +103,16 @@ mod tests {
     fn html_to_markdown_converts_basic_tags() {
         let md = html_to_markdown("<h2>Hi</h2><p>there</p>").unwrap();
         assert_eq!(md, "## Hi\n\nthere");
+    }
+
+    #[test]
+    fn html_to_markdown_leaves_code_blocks_unescaped() {
+        // htmd 0.6 backslash-escapes `$`, `&`, `~` etc. in prose for CommonMark
+        // round-trip safety; code blocks must stay verbatim so shell snippets
+        // in posts remain copy-pasteable.
+        let md =
+            html_to_markdown("<pre><code>echo $HOME &amp;&amp; ls ~/x_y</code></pre>").unwrap();
+        assert!(md.contains("echo $HOME && ls ~/x_y"), "got: {md}");
     }
 
     #[test]
