@@ -1,6 +1,6 @@
 [package]
 name = "mcp_info_server"
-version = "26.11.16"
+version = "26.11.24"
 edition = "2024"
 authors = ["Cooper Ry Lees <me@cooperlees.com>"]
 license = "GPL-2.0-or-later"
@@ -13,7 +13,7 @@ axum = "0.8"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "serde"] }
 governor = "0.10"
 hickory-resolver = "0.26.2"
-htmd = "0.5"
+htmd = "0.6"
 ipnet = "2"
 moka = { version = "0.12.15", features = ["future"] }
 opentelemetry = "0.33"
